@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "BeetleView (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "BeetleView (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

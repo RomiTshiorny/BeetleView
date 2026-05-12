@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="BeetleView.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:BeetleView"
+    xmlns:vm="using:BeetleView.ViewModels"
+    xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="12" RowSpacing="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8">
+            <Button x:Name="OpenButton" Click="OpenButton_Click">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE8E5;" FontSize="14" />
+                    <TextBlock Text="Open .beetle..." />
+                </StackPanel>
+            </Button>
+            <Button x:Name="RegisterAssocButton"
+                    Click="RegisterAssocButton_Click"
+                    ToolTipService.ToolTip="Register .beetle file association for the current user (per-user HKCU; no admin)">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE71B;" FontSize="14" />
+                    <TextBlock Text="Register .beetle association" />
+                </StackPanel>
+            </Button>
+            <ProgressRing x:Name="LoadingRing"
+                          IsActive="False"
+                          Width="20" Height="20"
+                          VerticalAlignment="Center" />
+            <TextBlock x:Name="FilePathText"
+                       VerticalAlignment="Center"
+                       Opacity="0.7"
+                       TextTrimming="CharacterEllipsis"
+                       Text="No file loaded" />
+        </StackPanel>
+
+        <!-- Session info -->
+        <Border Grid.Row="1"
+                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                CornerRadius="4"
+                Padding="10,6"
+                Visibility="Collapsed"
+                x:Name="SessionInfoBorder">
+            <TextBlock x:Name="SessionInfoText" TextWrapping="Wrap" FontSize="12" />
+        </Border>
+
+        <!-- Main split: processes | exceptions/stack (resizable) -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="300" MinWidth="160" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" MinWidth="200" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Left: processes -->
+            <Border Grid.Column="0"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="4">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0" Padding="10,4" ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   Text="Processes"
+                                   VerticalAlignment="Center"
+                                   FontWeight="SemiBold" />
+                        <TextBox Grid.Column="1"
+                                 x:Name="ProcessFilterBox"
+                                 PlaceholderText="Filter processes..."
+                                 TextChanged="ProcessFilterBox_TextChanged" />
+                    </Grid>
+                    <ListView Grid.Row="1"
+                              x:Name="ProcessList"
+                              SelectionMode="Single"
+                              SelectionChanged="ProcessList_SelectionChanged">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ProcessViewModel">
+                                <StackPanel Padding="0,4">
+                                    <TextBlock Text="{x:Bind DisplayName}"
+                                               TextTrimming="CharacterEllipsis"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock FontSize="11" Opacity="0.7">
+                                        <Run Text="pid=" /><Run Text="{x:Bind Pid}" />
+                                        <Run Text="  •  " />
+                                        <Run Text="{x:Bind ExceptionCount}" />
+                                        <Run Text="exceptions" />
+                                    </TextBlock>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Grid>
+            </Border>
+
+            <controls:GridSplitter Grid.Column="1"
+                                   Width="8"
+                                   ResizeBehavior="PreviousAndNext"
+                                   ResizeDirection="Columns"
+                                   Background="Transparent" />
+
+            <!-- Right: exceptions + stack (resizable) -->
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" MinHeight="120" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="2*" MinHeight="120" />
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="4">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Grid Grid.Row="0" Padding="10,6,10,6" ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Exceptions"
+                                       FontWeight="SemiBold"
+                                       VerticalAlignment="Center" />
+                            <TextBox Grid.Column="1"
+                                     x:Name="FilterBox"
+                                     PlaceholderText="Filter by type or message (case-insensitive)..."
+                                     TextChanged="FilterBox_TextChanged" />
+                            <TextBlock Grid.Column="2"
+                                       x:Name="ExceptionCountText"
+                                       VerticalAlignment="Center"
+                                       Opacity="0.7"
+                                       FontSize="12" />
+                        </Grid>
+
+                        <!-- Column headers -->
+                        <Grid Grid.Row="1"
+                              Padding="10,4"
+                              Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                              ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="170" />
+                                <ColumnDefinition Width="220" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Time (UTC)" FontWeight="SemiBold" FontSize="12" />
+                            <TextBlock Grid.Column="1" Text="Type" FontWeight="SemiBold" FontSize="12" />
+                            <TextBlock Grid.Column="2" Text="Message" FontWeight="SemiBold" FontSize="12" />
+                        </Grid>
+
+                        <Grid Grid.Row="2">
+                            <ListView x:Name="ExceptionList"
+                                      SelectionMode="Single"
+                                      SelectionChanged="ExceptionList_SelectionChanged">
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                        <Setter Property="Padding" Value="10,4" />
+                                    </Style>
+                                </ListView.ItemContainerStyle>
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:ExceptionViewModel">
+                                        <Grid ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="170" />
+                                                <ColumnDefinition Width="220" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0"
+                                                       Text="{x:Bind TimestampText}"
+                                                       FontFamily="Consolas"
+                                                       FontSize="12" />
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{x:Bind ExceptionType}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       FontSize="12" />
+                                            <TextBlock Grid.Column="2"
+                                                       Text="{x:Bind ExceptionMessage}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       FontSize="12"
+                                                       Opacity="0.8" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                            <!-- Loading overlay for the exceptions list -->
+                            <Border x:Name="ExceptionsLoadingOverlay"
+                                    Visibility="Collapsed"
+                                    Background="{ThemeResource LayerOnAcrylicFillColorDefaultBrush}"
+                                    Opacity="0.85"
+                                    HorizontalAlignment="Stretch"
+                                    VerticalAlignment="Top"
+                                    Padding="10,6">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ProgressRing IsActive="True" Width="16" Height="16" />
+                                    <TextBlock x:Name="ExceptionsLoadingText" Text="Loading..." FontSize="12" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Grid>
+                </Border>
+
+                <controls:GridSplitter Grid.Row="1"
+                                       Height="8"
+                                       HorizontalAlignment="Stretch"
+                                       ResizeBehavior="PreviousAndNext"
+                                       ResizeDirection="Rows"
+                                       Background="Transparent" />
+
+                <Border Grid.Row="2"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="4">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0"
+                                   Padding="10,6"
+                                   Text="Stack trace"
+                                   FontWeight="SemiBold" />
+                        <ScrollViewer Grid.Row="1"
+                                      HorizontalScrollBarVisibility="Auto"
+                                      VerticalScrollBarVisibility="Auto"
+                                      Padding="10,0,10,10">
+                            <TextBlock x:Name="StackTraceText"
+                                       FontFamily="Consolas"
+                                       FontSize="12"
+                                       IsTextSelectionEnabled="True"
+                                       TextWrapping="NoWrap"
+                                       Text="Select an exception to view its stack trace." />
+                        </ScrollViewer>
+                    </Grid>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Page>
