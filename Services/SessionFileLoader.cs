@@ -56,9 +56,10 @@ internal static class SessionFileLoader
             Pid = 0,
             ExceptionCount = totalExceptions,
             PidPrefix = "",
-            Children = roots,
+            AllChildren = roots,
             IsExpanded = true,
         };
+        foreach (var r in roots) sentinel.Children.Add(r);
 
         string summary =
             $"Start: {session.StartTime:yyyy-MM-dd HH:mm:ss} UTC   •   " +
@@ -115,6 +116,7 @@ internal static class SessionFileLoader
                 StartMSec = start,
                 StopMSec = stop,
                 Exceptions = markers,
+                Process = p,
             });
         }
 
@@ -203,15 +205,19 @@ internal static class SessionFileLoader
         return MakeVm(p, kids);
     }
 
-    private static ProcessViewModel MakeVm(RecorderProcess p, IReadOnlyList<ProcessViewModel> kids) =>
-        new()
+    private static ProcessViewModel MakeVm(RecorderProcess p, IReadOnlyList<ProcessViewModel> kids)
+    {
+        var vm = new ProcessViewModel
         {
             Process = p,
             DisplayName = string.IsNullOrEmpty(p.ImageFileName) ? $"(pid {p.Id})" : p.ImageFileName,
             Pid = p.Id,
             ExceptionCount = p.Exceptions.Count,
             PidPrefix = $"pid={p.Id}  •  ",
-            Children = kids,
+            AllChildren = kids,
             IsExpanded = true,
         };
+        foreach (var c in kids) vm.Children.Add(c);
+        return vm;
+    }
 }

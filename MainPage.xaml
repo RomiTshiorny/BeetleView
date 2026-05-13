@@ -98,15 +98,28 @@
                             <DataTemplate x:DataType="vm:ProcessViewModel">
                                 <TreeViewItem ItemsSource="{x:Bind Children}"
                                               IsExpanded="{x:Bind IsExpanded, Mode=OneTime}">
-                                    <StackPanel Padding="0,2">
-                                        <TextBlock Text="{x:Bind DisplayName}"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   FontWeight="SemiBold" />
-                                        <TextBlock FontSize="11" Opacity="0.7">
-                                            <Run Text="{x:Bind PidPrefix}" /><Run Text="{x:Bind ExceptionCount}" />
-                                            <Run Text=" exceptions" />
-                                        </TextBlock>
-                                    </StackPanel>
+                                    <Grid ColumnSpacing="6" Padding="0,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <CheckBox Grid.Column="0"
+                                                  MinWidth="0"
+                                                  Padding="0"
+                                                  VerticalAlignment="Center"
+                                                  IsChecked="{x:Bind IsIncluded, Mode=TwoWay}"
+                                                  Click="ProcessIncludeCheckBox_Click"
+                                                  ToolTipService.ToolTip="Include this process (and its descendants) in the timeline and exception list" />
+                                        <StackPanel Grid.Column="1">
+                                            <TextBlock Text="{x:Bind DisplayName}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       FontWeight="SemiBold" />
+                                            <TextBlock FontSize="11" Opacity="0.7">
+                                                <Run Text="{x:Bind PidPrefix}" /><Run Text="{x:Bind ExceptionCount}" />
+                                                <Run Text=" exceptions" />
+                                            </TextBlock>
+                                        </StackPanel>
+                                    </Grid>
                                 </TreeViewItem>
                             </DataTemplate>
                         </TreeView.ItemTemplate>

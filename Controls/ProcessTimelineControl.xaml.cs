@@ -83,6 +83,7 @@ public sealed partial class ProcessTimelineControl : UserControl
     // re-renders (e.g. on resize). The overlay rectangle is a single Canvas
     // child whose Left/Width/Height we mutate directly.
     private bool _isDragging;
+    private bool _hasDragMoved;
     private double _dragOriginX;
     private Rectangle? _selectionOverlay;
 
@@ -113,6 +114,18 @@ public sealed partial class ProcessTimelineControl : UserControl
         _rows = rows ?? Array.Empty<TimelineRowViewModel>();
         _maxMSec = maxMSec > 0 ? maxMSec : 1;
         ClearSelectionInternal(notify: false);
+        ScheduleRender();
+    }
+
+    /// <summary>
+    /// Replaces the visible rows without touching the time axis or the
+    /// active selection. Used when callers want to hide a subset of rows
+    /// (e.g. unchecked processes, or processes outside a selected range)
+    /// while keeping the drag-selection overlay intact.
+    /// </summary>
+    public void SetVisibleRows(IReadOnlyList<TimelineRowViewModel> rows)
+    {
+        _rows = rows ?? Array.Empty<TimelineRowViewModel>();
         ScheduleRender();
     }
 
@@ -360,26 +373,35 @@ public sealed partial class ProcessTimelineControl : UserControl
 
         _isDragging = true;
         _dragOriginX = pt.X;
+        _hasDragMoved = false;
         DrawCanvas.CapturePointer(e.Pointer);
-
-        EnsureSelectionOverlay();
-        Canvas.SetLeft(_selectionOverlay!, pt.X);
-        Canvas.SetTop(_selectionOverlay!, 0);
-        _selectionOverlay!.Width = 0;
-        _selectionOverlay!.Height = DrawCanvas.Height;
-        _selectionOverlay!.Visibility = Visibility.Visible;
+        // Deliberately don't mutate the overlay yet — if the user just
+        // clicks without dragging (or the gesture is cancelled by a system
+        // event before they drag), the previously-committed range stays
+        // visible. The overlay only changes once we see actual movement.
     }
 
     private void DrawCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (!_isDragging || _selectionOverlay is null) return;
+        if (!_isDragging) return;
         var pt = e.GetCurrentPoint(DrawCanvas).Position;
         double x = ClampToTimeline(pt.X);
         double xLeft = Math.Min(_dragOriginX, x);
         double xRight = Math.Max(_dragOriginX, x);
-        Canvas.SetLeft(_selectionOverlay, xLeft);
-        _selectionOverlay.Width = Math.Max(1, xRight - xLeft);
-        _selectionOverlay.Height = DrawCanvas.Height;
+        double width = Math.Max(1, xRight - xLeft);
+
+        // Don't start drawing the in-flight rectangle until the user has
+        // actually moved past the click-vs-drag threshold. This stops a
+        // single click from briefly clobbering an existing selection.
+        if (!_hasDragMoved && width < MinDragWidthPx) return;
+        _hasDragMoved = true;
+
+        EnsureSelectionOverlay();
+        Canvas.SetLeft(_selectionOverlay!, xLeft);
+        Canvas.SetTop(_selectionOverlay!, 0);
+        _selectionOverlay!.Width = width;
+        _selectionOverlay!.Height = DrawCanvas.Height;
+        _selectionOverlay!.Visibility = Visibility.Visible;
     }
 
     private void DrawCanvas_PointerReleased(object sender, PointerRoutedEventArgs e)
@@ -392,9 +414,18 @@ public sealed partial class ProcessTimelineControl : UserControl
     private void DrawCanvas_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
     {
         if (!_isDragging) return;
-        // Treat as a cancel — don't commit a half-formed selection.
         _isDragging = false;
-        if (_selectionOverlay is not null && SelectionStartMSec is null)
+        _hasDragMoved = false;
+        // Capture was yanked mid-drag — don't commit a half-formed range.
+        // Restore the overlay to whatever was previously committed (or hide
+        // it entirely if there was no prior selection) so the user doesn't
+        // end up with a leftover half-drawn rectangle.
+        if (SelectionStartMSec is double s && SelectionEndMSec is double e2)
+        {
+            EnsureSelectionOverlay();
+            PositionOverlayFromMSec(s, e2);
+        }
+        else if (_selectionOverlay is not null)
         {
             _selectionOverlay.Visibility = Visibility.Collapsed;
         }
@@ -402,14 +433,17 @@ public sealed partial class ProcessTimelineControl : UserControl
 
     private void FinishDrag(Point endPoint)
     {
+        bool wasDrag = _hasDragMoved;
         _isDragging = false;
+        _hasDragMoved = false;
+
         double x = ClampToTimeline(endPoint.X);
         double xLeft = Math.Min(_dragOriginX, x);
         double xRight = Math.Max(_dragOriginX, x);
 
-        if (xRight - xLeft < MinDragWidthPx)
+        if (!wasDrag || xRight - xLeft < MinDragWidthPx)
         {
-            // Just a click — clear any existing selection.
+            // Plain click — clear any existing selection.
             ClearSelectionInternal(notify: true);
             return;
         }
