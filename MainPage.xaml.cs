@@ -20,11 +20,13 @@ public sealed partial class MainPage : Page
     private const int ExceptionListBatchSize = 200;
     private const int ExceptionListCap = 5000;
 
-    private readonly ObservableCollection<ProcessViewModel> _processes = new();
+    // Bound to the TreeView. Always contains exactly one entry — the
+    // "(All processes)" sentinel — whose Children are the real process roots.
+    private readonly ObservableCollection<ProcessViewModel> _processRoots = new();
     private readonly ObservableCollection<ExceptionViewModel> _exceptions = new();
 
-    // Unfiltered source of truth for the Processes list.
-    private readonly List<ProcessViewModel> _allProcesses = new();
+    // Unfiltered source of truth for the Processes tree.
+    private IReadOnlyList<ProcessViewModel> _allProcessRoots = Array.Empty<ProcessViewModel>();
     // Exceptions for the currently selected process (or all).
     private List<ExceptionViewModel> _allExceptionsForCurrentProcess = new();
 
@@ -37,7 +39,7 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         InitializeComponent();
-        ProcessList.ItemsSource = _processes;
+        ProcessTree.ItemsSource = _processRoots;
         ExceptionList.ItemsSource = _exceptions;
 
         Loaded += MainPage_Loaded;
@@ -112,15 +114,8 @@ public sealed partial class MainPage : Page
             SessionInfoText.Text = loaded.SummaryText;
             SessionInfoBorder.Visibility = Visibility.Visible;
 
-            _allProcesses.Clear();
-            _allProcesses.AddRange(loaded.Processes);
-
+            _allProcessRoots = loaded.ProcessRoots;
             ApplyProcessFilter();
-
-            if (_processes.Count > 0)
-            {
-                ProcessList.SelectedIndex = 0;
-            }
         }
         catch (Exception ex)
         {
@@ -138,8 +133,8 @@ public sealed partial class MainPage : Page
     private void ResetUiForLoad(string path)
     {
         CancelPopulation();
-        _processes.Clear();
-        _allProcesses.Clear();
+        _processRoots.Clear();
+        _allProcessRoots = Array.Empty<ProcessViewModel>();
         _exceptions.Clear();
         _allExceptionsForCurrentProcess = new List<ExceptionViewModel>();
         StackTraceText.Text = "";
@@ -151,43 +146,76 @@ public sealed partial class MainPage : Page
         OpenButton.IsEnabled = false;
     }
 
-    // -------------------- Processes list filter --------------------
+    // -------------------- Processes tree filter --------------------
 
     private void ProcessFilterBox_TextChanged(object sender, TextChangedEventArgs e) => ApplyProcessFilter();
 
     private void ApplyProcessFilter()
     {
         string f = ProcessFilterBox.Text?.Trim() ?? "";
-        _processes.Clear();
+        _processRoots.Clear();
 
-        foreach (var pvm in _allProcesses)
+        foreach (var root in _allProcessRoots)
         {
-            // The "(All processes)" sentinel is always visible when no filter
-            // is set; we hide it while filtering since the user is narrowing.
-            if (pvm.Process == null)
+            var filtered = FilterTree(root, f, isTopLevel: true);
+            if (filtered is not null)
             {
-                if (f.Length == 0) _processes.Add(pvm);
-                continue;
-            }
-
-            if (f.Length == 0
-                || pvm.DisplayName.Contains(f, StringComparison.OrdinalIgnoreCase)
-                || pvm.Pid.ToString().Contains(f, StringComparison.OrdinalIgnoreCase))
-            {
-                _processes.Add(pvm);
+                _processRoots.Add(filtered);
             }
         }
     }
 
+    /// <summary>
+    /// Returns a filtered clone of <paramref name="node"/> — a subtree whose
+    /// every leaf matches <paramref name="filter"/>, with ancestors of any
+    /// match retained so the path is visible. Returns null when nothing in
+    /// the subtree matches (and the node itself isn't a kept top-level item).
+    /// </summary>
+    private static ProcessViewModel? FilterTree(ProcessViewModel node, string filter, bool isTopLevel)
+    {
+        var filteredKids = new List<ProcessViewModel>(node.Children.Count);
+        foreach (var c in node.Children)
+        {
+            var fc = FilterTree(c, filter, isTopLevel: false);
+            if (fc is not null) filteredKids.Add(fc);
+        }
+
+        bool selfMatch = node.MatchesFilter(filter);
+        // Keep the (All processes) sentinel at the top level even when it
+        // doesn't directly "match" — losing it would hide the global option.
+        bool isSentinel = node.Process is null;
+        bool keep = selfMatch || filteredKids.Count > 0 || (isTopLevel && isSentinel);
+        if (!keep) return null;
+
+        return new ProcessViewModel
+        {
+            Process = node.Process,
+            DisplayName = node.DisplayName,
+            Pid = node.Pid,
+            PidPrefix = node.PidPrefix,
+            ExceptionCount = node.ExceptionCount,
+            Children = filteredKids,
+            // Auto-expand while filtering so matches are visible without
+            // hunting through collapsed branches.
+            IsExpanded = node.IsExpanded || (filter.Length > 0 && filteredKids.Count > 0),
+        };
+    }
+
     // -------------------- Selection / Exceptions list population --------------------
 
-    private async void ProcessList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void ProcessTree_SelectionChanged(TreeView sender, TreeViewSelectionChangedEventArgs args)
+    {
+        var pvm = args.AddedItems.Count > 0 ? args.AddedItems[0] as ProcessViewModel : null;
+        await OnProcessSelectedAsync(pvm);
+    }
+
+    private async Task OnProcessSelectedAsync(ProcessViewModel? pvm)
     {
         CancelPopulation();
         _exceptions.Clear();
         StackTraceText.Text = "Select an exception to view its stack trace.";
 
-        if (_loaded is null || ProcessList.SelectedItem is not ProcessViewModel pvm)
+        if (_loaded is null || pvm is null)
         {
             _allExceptionsForCurrentProcess = new List<ExceptionViewModel>();
             ExceptionCountText.Text = "";
@@ -198,7 +226,7 @@ public sealed partial class MainPage : Page
         _populationCts = cts;
         var ct = cts.Token;
 
-        ShowExceptionsOverlay(pvm.Process == null
+        ShowExceptionsOverlay(pvm.Process is null
             ? $"Gathering {pvm.ExceptionCount:N0} exceptions across all processes..."
             : $"Loading {pvm.ExceptionCount:N0} exceptions...");
 

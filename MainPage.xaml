@@ -86,26 +86,28 @@
                                  PlaceholderText="Filter processes..."
                                  TextChanged="ProcessFilterBox_TextChanged" />
                     </Grid>
-                    <ListView Grid.Row="1"
-                              x:Name="ProcessList"
+                   
+                    <TreeView Grid.Row="1"
+                              x:Name="ProcessTree"
                               SelectionMode="Single"
-                              SelectionChanged="ProcessList_SelectionChanged">
-                        <ListView.ItemTemplate>
+                              SelectionChanged="ProcessTree_SelectionChanged">
+                        <TreeView.ItemTemplate>
                             <DataTemplate x:DataType="vm:ProcessViewModel">
-                                <StackPanel Padding="0,4">
-                                    <TextBlock Text="{x:Bind DisplayName}"
-                                               TextTrimming="CharacterEllipsis"
-                                               FontWeight="SemiBold" />
-                                    <TextBlock FontSize="11" Opacity="0.7">
-                                        <Run Text="pid=" /><Run Text="{x:Bind Pid}" />
-                                        <Run Text="  •  " />
-                                        <Run Text="{x:Bind ExceptionCount}" />
-                                        <Run Text="exceptions" />
-                                    </TextBlock>
-                                </StackPanel>
+                                <TreeViewItem ItemsSource="{x:Bind Children}"
+                                              IsExpanded="{x:Bind IsExpanded, Mode=OneTime}">
+                                    <StackPanel Padding="0,2">
+                                        <TextBlock Text="{x:Bind DisplayName}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock FontSize="11" Opacity="0.7">
+                                            <Run Text="{x:Bind PidPrefix}" /><Run Text="{x:Bind ExceptionCount}" />
+                                            <Run Text=" exceptions" />
+                                        </TextBlock>
+                                    </StackPanel>
+                                </TreeViewItem>
                             </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
                 </Grid>
             </Border>
 
