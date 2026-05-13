@@ -158,6 +158,6 @@ internal static class SessionFileLoader
             ExceptionCount = p.Exceptions.Count,
             PidPrefix = $"pid={p.Id}  •  ",
             Children = kids,
-            IsExpanded = false,
+            IsExpanded = true,
         };
 }
