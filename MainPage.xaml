@@ -6,6 +6,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="using:BeetleView"
     xmlns:vm="using:BeetleView.ViewModels"
+    xmlns:tlc="using:BeetleView.Controls"
     xmlns:controls="using:CommunityToolkit.WinUI.Controls"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -14,7 +15,9 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
+            <RowDefinition Height="2*" MinHeight="200" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" MinHeight="120" />
         </Grid.RowDefinitions>
 
         <!-- Toolbar -->
@@ -258,5 +261,30 @@
                 </Border>
             </Grid>
         </Grid>
+
+        <controls:GridSplitter Grid.Row="3"
+                               Height="8"
+                               HorizontalAlignment="Stretch"
+                               ResizeBehavior="PreviousAndNext"
+                               ResizeDirection="Rows"
+                               Background="Transparent" />
+
+        <!-- Bottom: process timeline visualizer -->
+        <Border Grid.Row="4"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="4">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0"
+                           Padding="10,6"
+                           Text="Timeline"
+                           FontWeight="SemiBold" />
+                <tlc:ProcessTimelineControl Grid.Row="1" x:Name="Timeline" />
+            </Grid>
+        </Border>
     </Grid>
 </Page>

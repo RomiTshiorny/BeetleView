@@ -116,6 +116,7 @@ public sealed partial class MainPage : Page
 
             _allProcessRoots = loaded.ProcessRoots;
             ApplyProcessFilter();
+            Timeline.SetData(loaded.TimelineRows, loaded.SessionDurationMSec);
         }
         catch (Exception ex)
         {
@@ -140,6 +141,7 @@ public sealed partial class MainPage : Page
         StackTraceText.Text = "";
         ExceptionCountText.Text = "";
         SessionInfoBorder.Visibility = Visibility.Collapsed;
+        Timeline.Clear();
 
         FilePathText.Text = $"Loading {path}...";
         LoadingRing.IsActive = true;

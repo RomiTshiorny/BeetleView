@@ -12,12 +12,15 @@ namespace BeetleView.Services;
 /// <summary>
 /// Result of loading a .beetle file: the parsed <see cref="Session"/>, the
 /// root nodes for the Processes <c>TreeView</c> (a single synthetic
-/// "(All processes)" sentinel that owns every other process), and a
-/// human-readable summary line for the session-info banner.
+/// "(All processes)" sentinel that owns every other process), flat rows for
+/// the timeline visualizer, and a human-readable summary line for the
+/// session-info banner.
 /// </summary>
 public sealed record LoadedSession(
     Session Session,
     IReadOnlyList<ProcessViewModel> ProcessRoots,
+    IReadOnlyList<TimelineRowViewModel> TimelineRows,
+    double SessionDurationMSec,
     string SummaryText);
 
 /// <summary>
@@ -44,6 +47,7 @@ internal static class SessionFileLoader
         int totalExceptions = session.Processes.Sum(p => p.Exceptions.Count);
 
         var roots = BuildTree(session);
+        var (timelineRows, durationMSec) = BuildTimeline(session);
 
         var sentinel = new ProcessViewModel
         {
@@ -64,7 +68,57 @@ internal static class SessionFileLoader
             $"Events lost: {session.EventsLost}   •   " +
             $"File: {fileInfo.Length / (1024.0 * 1024.0):N1} MB";
 
-        return new LoadedSession(session, new[] { sentinel }, summary);
+        return new LoadedSession(session, new[] { sentinel }, timelineRows, durationMSec, summary);
+    }
+
+    private static (IReadOnlyList<TimelineRowViewModel> Rows, double DurationMSec) BuildTimeline(Session session)
+    {
+        // Session-end fallback for the time axis. SessionEndTimeRelativeMSec
+        // is the recorder's authoritative end; if it's missing or zero we
+        // fall back to the max observed timestamp.
+        double end = session.SessionEndTimeRelativeMSec;
+        foreach (var p in session.Processes)
+        {
+            if (p.StopTimeRelativeMSec > end) end = p.StopTimeRelativeMSec;
+            if (p.StartTimeRelativeMSec > end) end = p.StartTimeRelativeMSec;
+            foreach (var ex in p.Exceptions)
+            {
+                if (ex.TimestampMS > end) end = ex.TimestampMS;
+            }
+        }
+        if (end <= 0) end = 1; // avoid div-by-zero downstream
+
+        // Order rows by start time so the visualizer reads top-to-bottom in
+        // launch order (matching the reference tool's layout).
+        var ordered = session.Processes
+            .OrderBy(p => p.StartTimeRelativeMSec)
+            .ThenBy(p => p.Id);
+
+        var rows = new List<TimelineRowViewModel>(session.Processes.Count);
+        foreach (var p in ordered)
+        {
+            double start = p.StartTimeRelativeMSec;
+            double stop = p.StopTimeRelativeMSec > 0 ? p.StopTimeRelativeMSec : end;
+            if (stop < start) stop = start;
+
+            var markers = new List<ExceptionMarker>(p.Exceptions.Count);
+            foreach (var ex in p.Exceptions)
+            {
+                markers.Add(new ExceptionMarker(ex.TimestampMS, ex.ExceptionType ?? ""));
+            }
+
+            string image = string.IsNullOrEmpty(p.ImageFileName) ? $"pid {p.Id}" : p.ImageFileName;
+            rows.Add(new TimelineRowViewModel
+            {
+                Label = $"{image} {p.Id}",
+                Pid = p.Id,
+                StartMSec = start,
+                StopMSec = stop,
+                Exceptions = markers,
+            });
+        }
+
+        return (rows, end);
     }
 
     private static IReadOnlyList<ProcessViewModel> BuildTree(Session session)
