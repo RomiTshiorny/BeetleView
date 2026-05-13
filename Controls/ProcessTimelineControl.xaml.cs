@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using BeetleView.ViewModels;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -14,6 +16,11 @@ namespace BeetleView.Controls;
 /// Renders a horizontal swimlane per process: one short lifetime bar plus a
 /// vertical tick per exception event, colored by exception type. Inspired by
 /// the timeline visualizer in PerfView-style tools.
+///
+/// Performance: exception markers are binned by pixel column per row so a
+/// process that threw 50,000 exceptions yields at most ~timelineWidth ticks
+/// rather than 50,000 individual XAML elements. Rendering is also batched
+/// with cooperative yields so very wide sessions don't hang the UI thread.
 /// </summary>
 public sealed partial class ProcessTimelineControl : UserControl
 {
@@ -23,40 +30,51 @@ public sealed partial class ProcessTimelineControl : UserControl
     private const double LeftPadding = 6;
     private const double RightPadding = 12;
 
-    // Brushes for the bar fill (subtle) and bar stroke (the visible line).
+    // Hard cap on the number of process lanes rendered. Beyond this point the
+    // visualizer stops being scannable and starts being expensive; rows are
+    // prioritized by exception count so the most "interesting" processes
+    // surface first.
+    private const int MaxRowsRendered = 400;
+
+    // Yield to the UI dispatcher every N rows during render so input stays
+    // responsive on very large sessions.
+    private const int RenderYieldEvery = 25;
+
     private static readonly SolidColorBrush BarBrush = new(Color.FromArgb(0xFF, 0x60, 0x80, 0xA8));
     private static readonly SolidColorBrush LabelBrush = new(Color.FromArgb(0xFF, 0xDD, 0xDD, 0xDD));
     private static readonly SolidColorBrush AxisBrush = new(Color.FromArgb(0x80, 0xCC, 0xCC, 0xCC));
     private static readonly SolidColorBrush GridBrush = new(Color.FromArgb(0x30, 0xCC, 0xCC, 0xCC));
 
-    // Stable color palette for exception types. A type's index is determined
-    // by a deterministic hash of its name so colors don't change between
-    // renders within a session.
+    // Stable color palette. A type's index is determined by a deterministic
+    // hash of its name so colors don't change between renders.
     private static readonly Color[] Palette = new[]
     {
-        Color.FromArgb(0xFF, 0xE5, 0x4B, 0x4B), // red
-        Color.FromArgb(0xFF, 0xE6, 0x8A, 0x2E), // orange
-        Color.FromArgb(0xFF, 0xE6, 0xC8, 0x2E), // yellow
-        Color.FromArgb(0xFF, 0x6F, 0xC8, 0x3C), // lime
-        Color.FromArgb(0xFF, 0x2E, 0xB3, 0x6B), // green
-        Color.FromArgb(0xFF, 0x2E, 0xC8, 0xC8), // cyan
-        Color.FromArgb(0xFF, 0x4A, 0x8C, 0xE6), // blue
-        Color.FromArgb(0xFF, 0x8E, 0x6E, 0xE6), // indigo
-        Color.FromArgb(0xFF, 0xC8, 0x55, 0xE6), // magenta
-        Color.FromArgb(0xFF, 0xE6, 0x66, 0xA6), // pink
-        Color.FromArgb(0xFF, 0xA0, 0x6A, 0x42), // brown
-        Color.FromArgb(0xFF, 0x9E, 0x9E, 0x9E), // gray
+        Color.FromArgb(0xFF, 0xE5, 0x4B, 0x4B),
+        Color.FromArgb(0xFF, 0xE6, 0x8A, 0x2E),
+        Color.FromArgb(0xFF, 0xE6, 0xC8, 0x2E),
+        Color.FromArgb(0xFF, 0x6F, 0xC8, 0x3C),
+        Color.FromArgb(0xFF, 0x2E, 0xB3, 0x6B),
+        Color.FromArgb(0xFF, 0x2E, 0xC8, 0xC8),
+        Color.FromArgb(0xFF, 0x4A, 0x8C, 0xE6),
+        Color.FromArgb(0xFF, 0x8E, 0x6E, 0xE6),
+        Color.FromArgb(0xFF, 0xC8, 0x55, 0xE6),
+        Color.FromArgb(0xFF, 0xE6, 0x66, 0xA6),
+        Color.FromArgb(0xFF, 0xA0, 0x6A, 0x42),
+        Color.FromArgb(0xFF, 0x9E, 0x9E, 0x9E),
     };
 
     private IReadOnlyList<TimelineRowViewModel> _rows = Array.Empty<TimelineRowViewModel>();
     private double _maxMSec = 1;
     private readonly Dictionary<string, SolidColorBrush> _typeBrushCache = new();
 
+    // Cancels any in-flight render when data changes or the size changes —
+    // without this, two renders could race and double-add elements.
+    private CancellationTokenSource? _renderCts;
+
     public ProcessTimelineControl()
     {
         InitializeComponent();
-        SizeChanged += (_, _) => Render();
-        VScroll.ViewChanged += (_, _) => { /* horizontal width is fixed to viewport; no-op */ };
+        SizeChanged += (_, _) => ScheduleRender();
     }
 
     /// <summary>Assigns the data and triggers a render.</summary>
@@ -64,57 +82,99 @@ public sealed partial class ProcessTimelineControl : UserControl
     {
         _rows = rows ?? Array.Empty<TimelineRowViewModel>();
         _maxMSec = maxMSec > 0 ? maxMSec : 1;
-        Render();
+        ScheduleRender();
     }
 
     public void Clear()
     {
         _rows = Array.Empty<TimelineRowViewModel>();
         _maxMSec = 1;
-        Render();
+        ScheduleRender();
     }
 
-    private void Render()
+    private void ScheduleRender()
+    {
+        _renderCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _renderCts = cts;
+        _ = RenderAsync(cts.Token);
+    }
+
+    private async Task RenderAsync(CancellationToken ct)
     {
         DrawCanvas.Children.Clear();
 
         if (_rows.Count == 0)
         {
+            EmptyText.Text = "No session loaded.";
             EmptyText.Visibility = Visibility.Visible;
             DrawCanvas.Width = 0;
             DrawCanvas.Height = 0;
             return;
         }
 
-        EmptyText.Visibility = Visibility.Collapsed;
-
-        // Use the ScrollViewer's viewport for horizontal sizing; if it hasn't
-        // been measured yet, fall back to the control's ActualWidth.
         double availableWidth = VScroll.ViewportWidth > 0 ? VScroll.ViewportWidth : ActualWidth;
         if (availableWidth <= 0) return;
 
-        // Canvas spans the viewport width (no horizontal scroll). The total
-        // height accommodates the time-axis header plus one row per process.
+        // Prioritize the most-exception-heavy processes when capping; those
+        // are usually what an engineer wants to see first.
+        IReadOnlyList<TimelineRowViewModel> rowsToRender;
+        bool truncated;
+        if (_rows.Count > MaxRowsRendered)
+        {
+            var ordered = new List<TimelineRowViewModel>(_rows);
+            ordered.Sort((a, b) => b.Exceptions.Count.CompareTo(a.Exceptions.Count));
+            ordered.RemoveRange(MaxRowsRendered, ordered.Count - MaxRowsRendered);
+            // Re-sort kept rows by start time so they still read chronologically.
+            ordered.Sort((a, b) => a.StartMSec.CompareTo(b.StartMSec));
+            rowsToRender = ordered;
+            truncated = true;
+        }
+        else
+        {
+            rowsToRender = _rows;
+            truncated = false;
+        }
+
+        if (truncated)
+        {
+            EmptyText.Text = $"Showing top {MaxRowsRendered:N0} processes by exception count (of {_rows.Count:N0}).";
+            EmptyText.HorizontalAlignment = HorizontalAlignment.Right;
+            EmptyText.VerticalAlignment = VerticalAlignment.Top;
+            EmptyText.Margin = new Thickness(0, 4, 12, 0);
+            EmptyText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            EmptyText.Visibility = Visibility.Collapsed;
+        }
+
         DrawCanvas.Width = availableWidth;
-        DrawCanvas.Height = HeaderHeight + _rows.Count * RowHeight;
+        DrawCanvas.Height = HeaderHeight + rowsToRender.Count * RowHeight;
 
         double timelineLeft = LabelWidth;
         double timelineWidth = availableWidth - LabelWidth - RightPadding;
         if (timelineWidth < 50) timelineWidth = 50;
 
         DrawTimeAxis(timelineLeft, timelineWidth);
-        DrawGridlines(timelineLeft, timelineWidth);
+        DrawGridlines(timelineLeft, timelineWidth, rowsToRender.Count);
 
-        for (int i = 0; i < _rows.Count; i++)
+        for (int i = 0; i < rowsToRender.Count; i++)
         {
-            DrawRow(_rows[i], i, timelineLeft, timelineWidth);
+            if (ct.IsCancellationRequested) return;
+            DrawRow(rowsToRender[i], i, timelineLeft, timelineWidth);
+
+            if ((i + 1) % RenderYieldEvery == 0)
+            {
+                await Task.Yield();
+                if (ct.IsCancellationRequested) return;
+            }
         }
     }
 
     private void DrawTimeAxis(double left, double width)
     {
-        // Baseline line at the bottom of the header.
-        var baseline = new Line
+        DrawCanvas.Children.Add(new Line
         {
             X1 = LeftPadding,
             X2 = left + width,
@@ -122,20 +182,15 @@ public sealed partial class ProcessTimelineControl : UserControl
             Y2 = HeaderHeight - 0.5,
             Stroke = AxisBrush,
             StrokeThickness = 1,
-        };
-        DrawCanvas.Children.Add(baseline);
+        });
 
-        // Major ticks: aim for one every ~120px, snapped to a "nice" duration
-        // (1ms..1min progression) so labels read cleanly.
         int targetTicks = Math.Max(2, (int)(width / 120.0));
-        double rawStep = _maxMSec / targetTicks;
-        double step = NiceStep(rawStep);
+        double step = NiceStep(_maxMSec / targetTicks);
         if (step <= 0) step = _maxMSec;
 
         for (double t = 0; t <= _maxMSec + 0.5; t += step)
         {
             double x = left + (t / _maxMSec) * width;
-
             DrawCanvas.Children.Add(new Line
             {
                 X1 = x, X2 = x,
@@ -157,13 +212,13 @@ public sealed partial class ProcessTimelineControl : UserControl
         }
     }
 
-    private void DrawGridlines(double left, double width)
+    private void DrawGridlines(double left, double width, int rowCount)
     {
         int targetTicks = Math.Max(2, (int)(width / 120.0));
         double step = NiceStep(_maxMSec / targetTicks);
         if (step <= 0) return;
 
-        double bottom = HeaderHeight + _rows.Count * RowHeight;
+        double bottom = HeaderHeight + rowCount * RowHeight;
         for (double t = step; t < _maxMSec; t += step)
         {
             double x = left + (t / _maxMSec) * width;
@@ -183,7 +238,6 @@ public sealed partial class ProcessTimelineControl : UserControl
         double y = HeaderHeight + index * RowHeight;
         double midY = y + RowHeight / 2;
 
-        // Label (truncated by Width + TextTrimming).
         var label = new TextBlock
         {
             Text = row.Label,
@@ -196,12 +250,10 @@ public sealed partial class ProcessTimelineControl : UserControl
         Canvas.SetTop(label, y + 4);
         DrawCanvas.Children.Add(label);
 
-        // Lifetime bar.
         double xStart = left + (row.StartMSec / _maxMSec) * width;
         double xStop = left + (row.StopMSec / _maxMSec) * width;
         if (xStop < xStart) xStop = xStart;
 
-        // Minimum visible width so very short-lived processes aren't invisible.
         double barWidth = Math.Max(2, xStop - xStart);
         var bar = new Rectangle
         {
@@ -213,13 +265,21 @@ public sealed partial class ProcessTimelineControl : UserControl
         Canvas.SetTop(bar, midY + 4);
         DrawCanvas.Children.Add(bar);
 
-        // Exception markers — vertical ticks colored by exception type.
+        // Exception markers — pixel-binned per column. Within a single pixel
+        // column we keep only one tick (first exception type seen wins). This
+        // collapses tens of thousands of overlapping ticks down to at most
+        // ~timelineWidth elements per row.
         double markerTop = y + 2;
         double markerHeight = RowHeight - 4;
+        double scale = width / _maxMSec;
+        int minCol = (int)left - 1;
+        int maxCol = (int)(left + width) + 1;
+        var seen = new HashSet<int>();
         foreach (var ex in row.Exceptions)
         {
-            double x = left + (ex.TimestampMSec / _maxMSec) * width;
-            if (x < left - 1 || x > left + width + 1) continue; // clip
+            int col = (int)(left + ex.TimestampMSec * scale);
+            if (col < minCol || col > maxCol) continue;
+            if (!seen.Add(col)) continue;
 
             var tick = new Rectangle
             {
@@ -227,9 +287,8 @@ public sealed partial class ProcessTimelineControl : UserControl
                 Height = markerHeight,
                 Fill = BrushForType(ex.ExceptionType),
             };
-            Canvas.SetLeft(tick, x - 1);
+            Canvas.SetLeft(tick, col);
             Canvas.SetTop(tick, markerTop);
-            ToolTipService.SetToolTip(tick, $"{ex.ExceptionType}\n@ {FormatMSec(ex.TimestampMSec)}");
             DrawCanvas.Children.Add(tick);
         }
     }
@@ -238,8 +297,7 @@ public sealed partial class ProcessTimelineControl : UserControl
     {
         type ??= "";
         if (_typeBrushCache.TryGetValue(type, out var brush)) return brush;
-        // Stable index from a simple FNV-1a-style hash so colors are
-        // deterministic across renders within a session (and across runs).
+        // Stable FNV-1a hash so colors are deterministic across renders.
         uint hash = 2166136261u;
         foreach (char c in type)
         {
@@ -255,7 +313,6 @@ public sealed partial class ProcessTimelineControl : UserControl
     private static double NiceStep(double raw)
     {
         if (raw <= 0) return 1;
-        // Snap to 1, 2, 5 × 10^n.
         double mag = Math.Pow(10, Math.Floor(Math.Log10(raw)));
         double norm = raw / mag;
         double snap = norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10;
