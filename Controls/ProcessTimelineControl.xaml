@@ -7,7 +7,24 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
     <Grid Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
-        <ScrollViewer x:Name="VScroll"
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <!-- Status bar: render progress, truncation notice, etc. Kept out of
+             the canvas itself so it never overlaps the time axis labels. -->
+        <Border Grid.Row="0"
+                x:Name="StatusBar"
+                Visibility="Collapsed"
+                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                Padding="10,3">
+            <TextBlock x:Name="StatusText"
+                       FontSize="11"
+                       Opacity="0.85"
+                       TextTrimming="CharacterEllipsis" />
+        </Border>
+        <ScrollViewer Grid.Row="1"
+                      x:Name="VScroll"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
                       ZoomMode="Disabled">
@@ -16,6 +33,7 @@
                     HorizontalAlignment="Stretch" />
         </ScrollViewer>
         <TextBlock x:Name="EmptyText"
+                   Grid.Row="1"
                    Text="No session loaded."
                    Opacity="0.6"
                    HorizontalAlignment="Center"
@@ -23,3 +41,4 @@
                    Visibility="Visible" />
     </Grid>
 </UserControl>
+

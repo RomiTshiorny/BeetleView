@@ -41,8 +41,28 @@ public sealed partial class MainPage : Page
         InitializeComponent();
         ProcessTree.ItemsSource = _processRoots;
         ExceptionList.ItemsSource = _exceptions;
+        Timeline.TimeRangeChanged += Timeline_TimeRangeChanged;
 
         Loaded += MainPage_Loaded;
+    }
+
+    // Time-range filter from the timeline drag selection. null = no filter.
+    private double? _timeRangeStartMSec;
+    private double? _timeRangeEndMSec;
+
+    private async void Timeline_TimeRangeChanged(double? startMSec, double? endMSec)
+    {
+        _timeRangeStartMSec = startMSec;
+        _timeRangeEndMSec = endMSec;
+
+        CancelPopulation();
+        var cts = new CancellationTokenSource();
+        _populationCts = cts;
+        try
+        {
+            await ApplyFilterAsync(cts.Token);
+        }
+        catch (OperationCanceledException) { }
     }
 
     // -------------------- Lifecycle / Toolbar --------------------
@@ -116,6 +136,12 @@ public sealed partial class MainPage : Page
 
             _allProcessRoots = loaded.ProcessRoots;
             ApplyProcessFilter();
+
+            // Yield so the toolbar / session info / process tree paint
+            // before we kick off the (potentially expensive) timeline render.
+            // Without this the user stares at a blank window while the
+            // timeline builds its first batch of rows.
+            await Task.Yield();
             Timeline.SetData(loaded.TimelineRows, loaded.SessionDurationMSec);
         }
         catch (Exception ex)
@@ -142,6 +168,8 @@ public sealed partial class MainPage : Page
         ExceptionCountText.Text = "";
         SessionInfoBorder.Visibility = Visibility.Collapsed;
         Timeline.Clear();
+        _timeRangeStartMSec = null;
+        _timeRangeEndMSec = null;
 
         FilePathText.Text = $"Loading {path}...";
         LoadingRing.IsActive = true;
@@ -274,6 +302,10 @@ public sealed partial class MainPage : Page
         string filter = FilterBox.Text?.Trim() ?? "";
 
         IEnumerable<ExceptionViewModel> source = _allExceptionsForCurrentProcess;
+        if (_timeRangeStartMSec is double rs && _timeRangeEndMSec is double re)
+        {
+            source = source.Where(v => v.Exception.TimestampMS >= rs && v.Exception.TimestampMS <= re);
+        }
         if (filter.Length > 0)
         {
             source = source.Where(v =>
@@ -284,6 +316,10 @@ public sealed partial class MainPage : Page
         int total = _allExceptionsForCurrentProcess.Count;
         int shown = 0;
         var batch = new List<ExceptionViewModel>(ExceptionListBatchSize);
+
+        bool isFiltered = filter.Length > 0
+            || _timeRangeStartMSec is not null
+            || _timeRangeEndMSec is not null;
 
         foreach (var v in source)
         {
@@ -297,13 +333,13 @@ public sealed partial class MainPage : Page
             {
                 foreach (var item in batch) _exceptions.Add(item);
                 batch.Clear();
-                UpdateExceptionCount(shown, total, filter.Length > 0 || shown < total);
+                UpdateExceptionCount(shown, total, isFiltered || shown < total);
                 await Task.Delay(1, ct);
             }
         }
 
         foreach (var item in batch) _exceptions.Add(item);
-        UpdateExceptionCount(shown, total, filter.Length > 0 || shown < total);
+        UpdateExceptionCount(shown, total, isFiltered || shown < total);
     }
 
     private void UpdateExceptionCount(int shown, int total, bool filtered)

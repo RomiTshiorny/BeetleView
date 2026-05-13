@@ -4,18 +4,22 @@ using System.Threading;
 using System.Threading.Tasks;
 using BeetleView.ViewModels;
 using Microsoft.UI;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
+using Windows.Foundation;
 using Windows.UI;
 
 namespace BeetleView.Controls;
 
 /// <summary>
-/// Renders a horizontal swimlane per process: one short lifetime bar plus a
-/// vertical tick per exception event, colored by exception type. Inspired by
-/// the timeline visualizer in PerfView-style tools.
+/// Renders a horizontal swimlane per process: a lifetime bar plus a vertical
+/// tick per exception event, colored by exception type. Supports drag-to-
+/// select a time range (raised via <see cref="TimeRangeChanged"/>; consumers
+/// typically use that to filter the exceptions list).
 ///
 /// Performance: exception markers are binned by pixel column per row so a
 /// process that threw 50,000 exceptions yields at most ~timelineWidth ticks
@@ -30,23 +34,20 @@ public sealed partial class ProcessTimelineControl : UserControl
     private const double LeftPadding = 6;
     private const double RightPadding = 12;
 
-    // Hard cap on the number of process lanes rendered. Beyond this point the
-    // visualizer stops being scannable and starts being expensive; rows are
-    // prioritized by exception count so the most "interesting" processes
-    // surface first.
     private const int MaxRowsRendered = 400;
-
-    // Yield to the UI dispatcher every N rows during render so input stays
-    // responsive on very large sessions.
     private const int RenderYieldEvery = 25;
+
+    // Below this drag width (in pixels) treat the gesture as a click and
+    // clear any existing selection instead of committing a new one.
+    private const double MinDragWidthPx = 3;
 
     private static readonly SolidColorBrush BarBrush = new(Color.FromArgb(0xFF, 0x60, 0x80, 0xA8));
     private static readonly SolidColorBrush LabelBrush = new(Color.FromArgb(0xFF, 0xDD, 0xDD, 0xDD));
     private static readonly SolidColorBrush AxisBrush = new(Color.FromArgb(0x80, 0xCC, 0xCC, 0xCC));
     private static readonly SolidColorBrush GridBrush = new(Color.FromArgb(0x30, 0xCC, 0xCC, 0xCC));
+    private static readonly SolidColorBrush SelectionFill = new(Color.FromArgb(0x40, 0x4A, 0x8C, 0xE6));
+    private static readonly SolidColorBrush SelectionStroke = new(Color.FromArgb(0xC0, 0x4A, 0x8C, 0xE6));
 
-    // Stable color palette. A type's index is determined by a deterministic
-    // hash of its name so colors don't change between renders.
     private static readonly Color[] Palette = new[]
     {
         Color.FromArgb(0xFF, 0xE5, 0x4B, 0x4B),
@@ -68,13 +69,42 @@ public sealed partial class ProcessTimelineControl : UserControl
     private readonly Dictionary<string, SolidColorBrush> _typeBrushCache = new();
 
     // Cancels any in-flight render when data changes or the size changes —
-    // without this, two renders could race and double-add elements.
+    // without this two renders could race and double-add elements.
     private CancellationTokenSource? _renderCts;
+
+    // Cached after each render so drag handlers can convert pointer X back
+    // to a millisecond offset without recomputing layout.
+    private double _timelineLeftPx = LabelWidth;
+    private double _timelineWidthPx;
+    private bool _truncated;
+    private int _renderedRowCount;
+
+    // Drag state. Selection coordinates are stored in MSec so they survive
+    // re-renders (e.g. on resize). The overlay rectangle is a single Canvas
+    // child whose Left/Width/Height we mutate directly.
+    private bool _isDragging;
+    private double _dragOriginX;
+    private Rectangle? _selectionOverlay;
+
+    public double? SelectionStartMSec { get; private set; }
+    public double? SelectionEndMSec { get; private set; }
+
+    /// <summary>
+    /// Raised when the user finishes a drag selection or clears it. Both
+    /// arguments are null when the selection is cleared; otherwise they are
+    /// in milliseconds relative to session start, with start &lt;= end.
+    /// </summary>
+    public event Action<double?, double?>? TimeRangeChanged;
 
     public ProcessTimelineControl()
     {
         InitializeComponent();
         SizeChanged += (_, _) => ScheduleRender();
+
+        DrawCanvas.PointerPressed += DrawCanvas_PointerPressed;
+        DrawCanvas.PointerMoved += DrawCanvas_PointerMoved;
+        DrawCanvas.PointerReleased += DrawCanvas_PointerReleased;
+        DrawCanvas.PointerCaptureLost += DrawCanvas_PointerCaptureLost;
     }
 
     /// <summary>Assigns the data and triggers a render.</summary>
@@ -82,6 +112,7 @@ public sealed partial class ProcessTimelineControl : UserControl
     {
         _rows = rows ?? Array.Empty<TimelineRowViewModel>();
         _maxMSec = maxMSec > 0 ? maxMSec : 1;
+        ClearSelectionInternal(notify: false);
         ScheduleRender();
     }
 
@@ -89,7 +120,26 @@ public sealed partial class ProcessTimelineControl : UserControl
     {
         _rows = Array.Empty<TimelineRowViewModel>();
         _maxMSec = 1;
+        ClearSelectionInternal(notify: false);
         ScheduleRender();
+    }
+
+    /// <summary>Public API for callers to clear the current selection.</summary>
+    public void ClearSelection() => ClearSelectionInternal(notify: true);
+
+    private void ClearSelectionInternal(bool notify)
+    {
+        SelectionStartMSec = null;
+        SelectionEndMSec = null;
+        if (_selectionOverlay is not null)
+        {
+            _selectionOverlay.Visibility = Visibility.Collapsed;
+        }
+        UpdateStatusBar();
+        if (notify)
+        {
+            TimeRangeChanged?.Invoke(null, null);
+        }
     }
 
     private void ScheduleRender()
@@ -102,73 +152,80 @@ public sealed partial class ProcessTimelineControl : UserControl
 
     private async Task RenderAsync(CancellationToken ct)
     {
+        // Yield once before mutating the canvas so the rest of the page
+        // (toolbar, process tree, exceptions list) paints first.
+        await Task.Yield();
+        if (ct.IsCancellationRequested) return;
+
         DrawCanvas.Children.Clear();
+        _selectionOverlay = null; // gets re-created below if a selection exists
 
         if (_rows.Count == 0)
         {
-            EmptyText.Text = "No session loaded.";
-            EmptyText.Visibility = Visibility.Visible;
             DrawCanvas.Width = 0;
             DrawCanvas.Height = 0;
+            _renderedRowCount = 0;
+            EmptyText.Visibility = Visibility.Visible;
+            UpdateStatusBar();
             return;
         }
+
+        EmptyText.Visibility = Visibility.Collapsed;
 
         double availableWidth = VScroll.ViewportWidth > 0 ? VScroll.ViewportWidth : ActualWidth;
         if (availableWidth <= 0) return;
 
-        // Prioritize the most-exception-heavy processes when capping; those
-        // are usually what an engineer wants to see first.
+        // Cap rows: keep the most-exception-having processes, sorted by start
+        // time so they still read chronologically.
         IReadOnlyList<TimelineRowViewModel> rowsToRender;
-        bool truncated;
         if (_rows.Count > MaxRowsRendered)
         {
             var ordered = new List<TimelineRowViewModel>(_rows);
             ordered.Sort((a, b) => b.Exceptions.Count.CompareTo(a.Exceptions.Count));
             ordered.RemoveRange(MaxRowsRendered, ordered.Count - MaxRowsRendered);
-            // Re-sort kept rows by start time so they still read chronologically.
             ordered.Sort((a, b) => a.StartMSec.CompareTo(b.StartMSec));
             rowsToRender = ordered;
-            truncated = true;
+            _truncated = true;
         }
         else
         {
             rowsToRender = _rows;
-            truncated = false;
+            _truncated = false;
         }
 
-        if (truncated)
-        {
-            EmptyText.Text = $"Showing top {MaxRowsRendered:N0} processes by exception count (of {_rows.Count:N0}).";
-            EmptyText.HorizontalAlignment = HorizontalAlignment.Right;
-            EmptyText.VerticalAlignment = VerticalAlignment.Top;
-            EmptyText.Margin = new Thickness(0, 4, 12, 0);
-            EmptyText.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            EmptyText.Visibility = Visibility.Collapsed;
-        }
+        _renderedRowCount = rowsToRender.Count;
+        UpdateStatusBar();
 
         DrawCanvas.Width = availableWidth;
         DrawCanvas.Height = HeaderHeight + rowsToRender.Count * RowHeight;
 
-        double timelineLeft = LabelWidth;
-        double timelineWidth = availableWidth - LabelWidth - RightPadding;
-        if (timelineWidth < 50) timelineWidth = 50;
+        _timelineLeftPx = LabelWidth;
+        _timelineWidthPx = availableWidth - LabelWidth - RightPadding;
+        if (_timelineWidthPx < 50) _timelineWidthPx = 50;
 
-        DrawTimeAxis(timelineLeft, timelineWidth);
-        DrawGridlines(timelineLeft, timelineWidth, rowsToRender.Count);
+        DrawTimeAxis(_timelineLeftPx, _timelineWidthPx);
+        DrawGridlines(_timelineLeftPx, _timelineWidthPx, rowsToRender.Count);
+        await Task.Yield();
+        if (ct.IsCancellationRequested) return;
 
         for (int i = 0; i < rowsToRender.Count; i++)
         {
             if (ct.IsCancellationRequested) return;
-            DrawRow(rowsToRender[i], i, timelineLeft, timelineWidth);
+            DrawRow(rowsToRender[i], i, _timelineLeftPx, _timelineWidthPx);
 
             if ((i + 1) % RenderYieldEvery == 0)
             {
                 await Task.Yield();
                 if (ct.IsCancellationRequested) return;
             }
+        }
+
+        // Re-overlay the selection (if any) so it sits on top of the lanes
+        // and survives a resize-driven re-render.
+        if (SelectionStartMSec is double s && SelectionEndMSec is double e)
+        {
+            EnsureSelectionOverlay();
+            PositionOverlayFromMSec(s, e);
         }
     }
 
@@ -293,11 +350,159 @@ public sealed partial class ProcessTimelineControl : UserControl
         }
     }
 
+    // -------------------- Drag-to-select time range --------------------
+
+    private void DrawCanvas_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        var pt = e.GetCurrentPoint(DrawCanvas).Position;
+        if (pt.X < _timelineLeftPx) return; // ignore clicks in the label column
+        if (_timelineWidthPx <= 0) return;
+
+        _isDragging = true;
+        _dragOriginX = pt.X;
+        DrawCanvas.CapturePointer(e.Pointer);
+
+        EnsureSelectionOverlay();
+        Canvas.SetLeft(_selectionOverlay!, pt.X);
+        Canvas.SetTop(_selectionOverlay!, 0);
+        _selectionOverlay!.Width = 0;
+        _selectionOverlay!.Height = DrawCanvas.Height;
+        _selectionOverlay!.Visibility = Visibility.Visible;
+    }
+
+    private void DrawCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isDragging || _selectionOverlay is null) return;
+        var pt = e.GetCurrentPoint(DrawCanvas).Position;
+        double x = ClampToTimeline(pt.X);
+        double xLeft = Math.Min(_dragOriginX, x);
+        double xRight = Math.Max(_dragOriginX, x);
+        Canvas.SetLeft(_selectionOverlay, xLeft);
+        _selectionOverlay.Width = Math.Max(1, xRight - xLeft);
+        _selectionOverlay.Height = DrawCanvas.Height;
+    }
+
+    private void DrawCanvas_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isDragging) return;
+        FinishDrag(e.GetCurrentPoint(DrawCanvas).Position);
+        DrawCanvas.ReleasePointerCapture(e.Pointer);
+    }
+
+    private void DrawCanvas_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isDragging) return;
+        // Treat as a cancel — don't commit a half-formed selection.
+        _isDragging = false;
+        if (_selectionOverlay is not null && SelectionStartMSec is null)
+        {
+            _selectionOverlay.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void FinishDrag(Point endPoint)
+    {
+        _isDragging = false;
+        double x = ClampToTimeline(endPoint.X);
+        double xLeft = Math.Min(_dragOriginX, x);
+        double xRight = Math.Max(_dragOriginX, x);
+
+        if (xRight - xLeft < MinDragWidthPx)
+        {
+            // Just a click — clear any existing selection.
+            ClearSelectionInternal(notify: true);
+            return;
+        }
+
+        double startMs = PxToMSec(xLeft);
+        double endMs = PxToMSec(xRight);
+        SelectionStartMSec = startMs;
+        SelectionEndMSec = endMs;
+
+        EnsureSelectionOverlay();
+        PositionOverlayFromMSec(startMs, endMs);
+
+        UpdateStatusBar();
+        TimeRangeChanged?.Invoke(startMs, endMs);
+    }
+
+    private void EnsureSelectionOverlay()
+    {
+        if (_selectionOverlay is not null)
+        {
+            if (!DrawCanvas.Children.Contains(_selectionOverlay))
+            {
+                DrawCanvas.Children.Add(_selectionOverlay);
+            }
+            return;
+        }
+
+        _selectionOverlay = new Rectangle
+        {
+            Fill = SelectionFill,
+            Stroke = SelectionStroke,
+            StrokeThickness = 1,
+            IsHitTestVisible = false, // let pointer events fall through to the canvas
+        };
+        DrawCanvas.Children.Add(_selectionOverlay);
+    }
+
+    private void PositionOverlayFromMSec(double startMs, double endMs)
+    {
+        if (_selectionOverlay is null) return;
+        double scale = _timelineWidthPx / _maxMSec;
+        double xLeft = _timelineLeftPx + startMs * scale;
+        double xRight = _timelineLeftPx + endMs * scale;
+        xLeft = Math.Clamp(xLeft, _timelineLeftPx, _timelineLeftPx + _timelineWidthPx);
+        xRight = Math.Clamp(xRight, _timelineLeftPx, _timelineLeftPx + _timelineWidthPx);
+        Canvas.SetLeft(_selectionOverlay, xLeft);
+        Canvas.SetTop(_selectionOverlay, 0);
+        _selectionOverlay.Width = Math.Max(1, xRight - xLeft);
+        _selectionOverlay.Height = DrawCanvas.Height;
+        _selectionOverlay.Visibility = Visibility.Visible;
+    }
+
+    private double ClampToTimeline(double x) =>
+        Math.Clamp(x, _timelineLeftPx, _timelineLeftPx + _timelineWidthPx);
+
+    private double PxToMSec(double x) =>
+        (x - _timelineLeftPx) / _timelineWidthPx * _maxMSec;
+
+    // -------------------- Status bar --------------------
+
+    private void UpdateStatusBar()
+    {
+        var parts = new List<string>(3);
+
+        if (SelectionStartMSec is double s && SelectionEndMSec is double e)
+        {
+            parts.Add($"Time range: {FormatMSec(s)} – {FormatMSec(e)} (drag again or click to clear)");
+        }
+        if (_truncated)
+        {
+            parts.Add($"Showing top {MaxRowsRendered:N0} processes by exception count (of {_rows.Count:N0})");
+        }
+        else if (_rows.Count > 0 && _renderedRowCount > 0)
+        {
+            parts.Add($"{_rows.Count:N0} processes  •  Click and drag on the timeline to filter by time");
+        }
+
+        if (parts.Count == 0)
+        {
+            StatusBar.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        StatusText.Text = string.Join("    ", parts);
+        StatusBar.Visibility = Visibility.Visible;
+    }
+
+    // -------------------- Helpers --------------------
+
     private SolidColorBrush BrushForType(string type)
     {
         type ??= "";
         if (_typeBrushCache.TryGetValue(type, out var brush)) return brush;
-        // Stable FNV-1a hash so colors are deterministic across renders.
         uint hash = 2166136261u;
         foreach (char c in type)
         {
