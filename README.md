@@ -17,6 +17,8 @@ Browse processes, filter exceptions, and view resolved stack traces — without 
 - Windows 10 build 17763 or newer (Windows 11 fully supported).
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) — only needed to build from source; the published `.exe` is self-contained.
 
+> **Note on MSVC:** The WinAppSDK's XAML markup compiler probes for the MSVC C++ build tools (`<VS>\VC\Tools\MSVC\`) at build time, even for pure-managed projects. BeetleView's `.csproj` sets stub `VCInstallPath32`/`VCInstallPath64` properties to short-circuit that probe so contributors without the C++ workload can still build. If your build fails with `GetLatestMSVCVersion` / `DirectoryNotFoundException` on `VC\Tools\MSVC`, either pull the latest `.csproj` or install the "MSVC v14x C++ build tools" component via the Visual Studio Installer.
+
 ## Build & run from source
 
 ```powershell
@@ -75,12 +77,6 @@ foreach (Process p in session.Processes)
     }
 }
 ```
-
-## Icon
-
-The app icon is the Windows-native 🪲 (BEETLE, U+1FAB2) glyph from Segoe UI Emoji, rendered at 7 sizes (16/24/32/48/64/128/256) and packed into `Assets\AppIcon.ico`. The icon is **embedded in the .exe** via `<ApplicationIcon>` (so Explorer/taskbar pick it up) and also referenced at runtime via `AppWindow.SetIcon` (for the window title bar).
-
-> Regenerating the icon requires an external one-off generator project that isn't part of this repo. The committed `Assets\AppIcon.ico` is the only thing the build needs.
 
 ## Publish (for distribution)
 

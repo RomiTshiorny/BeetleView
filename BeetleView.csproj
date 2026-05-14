@@ -43,6 +43,26 @@
     <PackageReference Include="Beetle.Core" Version="1.0.0" />
   </ItemGroup>
 
+  <!--
+    Bypass the WinAppSDK XAML markup compiler's unconditional MSVC probe.
+    Microsoft.UI.Xaml.Markup.Compiler.interop.targets defines a target
+    `GetVCInstallPath` that fails when `C:\Program Files\Microsoft Visual
+    Studio\<ver>\<edition>\VC\Tools\MSVC` doesn't exist — even though, for a
+    pure managed WinUI project, the C++ pieces it'd populate (`vcmeta.dll`)
+    are never actually consumed (`GetXamlCppIncludeDirectories` is gated by
+    `'$(ManagedAssembly)'=='false'`).
+
+    Setting `VCInstallPath32`/`VCInstallPath64` to non-empty stub values
+    short-circuits the `GetVCInstallPath` target so contributors without
+    the MSVC C++ build tools can still build BeetleView. If a future
+    WinAppSDK update starts consuming these paths for managed projects,
+    revisit — but for now this lets you skip a ~1.5 GB toolchain install.
+  -->
+  <PropertyGroup>
+    <VCInstallPath32>not-used-managed-only</VCInstallPath32>
+    <VCInstallPath64>not-used-managed-only</VCInstallPath64>
+  </PropertyGroup>
+
   <!-- Publish Properties -->
   <PropertyGroup>
     <!-- Both trimming and ReadyToRun are unreliable for unpackaged WinUI 3:
