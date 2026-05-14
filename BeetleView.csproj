@@ -24,6 +24,14 @@
     </Content>
   </ItemGroup>
 
+  <!-- Exclude the sibling test project's sources from this project's globs. -->
+  <ItemGroup>
+    <Compile Remove="BeetleView.Tests\**\*.cs" />
+    <None Remove="BeetleView.Tests\**\*" />
+    <Page Remove="BeetleView.Tests\**\*" />
+    <ApplicationDefinition Remove="BeetleView.Tests\**\*" />
+  </ItemGroup>
+
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>

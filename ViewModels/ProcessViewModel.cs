@@ -24,6 +24,23 @@ public sealed class ProcessViewModel : INotifyPropertyChanged
     public int ExceptionCount { get; init; }
 
     /// <summary>
+    /// Visual opacity for the tree row — full strength for the sentinel and
+    /// for any process whose subtree contains at least one exception; dimmed
+    /// for empty rows so the user can scan for "what actually threw" at a
+    /// glance.
+    /// </summary>
+    public double RowOpacity => (Process is null || ExceptionCount > 0) ? 1.0 : 0.4;
+
+    /// <summary>
+    /// Font weight for the row label. Bold when the subtree has any
+    /// exceptions, normal otherwise.
+    /// </summary>
+    public Windows.UI.Text.FontWeight LabelWeight =>
+        (Process is null || ExceptionCount > 0)
+            ? Microsoft.UI.Text.FontWeights.SemiBold
+            : Microsoft.UI.Text.FontWeights.Normal;
+
+    /// <summary>
     /// Pre-formatted "pid=N  •  " prefix so the data template can keep a
     /// single line layout for both real rows and the sentinel (which renders
     /// just the exception count without a pid).

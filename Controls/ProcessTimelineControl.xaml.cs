@@ -66,11 +66,29 @@ public sealed partial class ProcessTimelineControl : UserControl
 
     private IReadOnlyList<TimelineRowViewModel> _rows = Array.Empty<TimelineRowViewModel>();
     private double _maxMSec = 1;
+    // Active viewport in MSec. Defaults to the full session (0.._maxMSec)
+    // and shrinks when the user drags a range on the timeline. All
+    // px↔MSec math goes through these so rendering, gridlines, axis labels,
+    // and pointer events all stay consistent.
+    private double _viewStartMSec;
+    private double _viewEndMSec = 1;
     private readonly Dictionary<string, SolidColorBrush> _typeBrushCache = new();
 
     // Cancels any in-flight render when data changes or the size changes —
     // without this two renders could race and double-add elements.
     private CancellationTokenSource? _renderCts;
+
+    // Static children of DrawCanvas (labels, axis, gridlines). Tracked so a
+    // re-render on zoom only clears these — leaving the expensive ZoomLayer
+    // bars/ticks (and the named ZoomClip / SelectionOverlay) intact.
+    private readonly List<UIElement> _staticElements = new();
+
+    // Rows + width signature used by the last ZoomLayer build. If either
+    // changes we rebuild; otherwise zoom is just a CompositeTransform update,
+    // which is essentially free.
+    private IReadOnlyList<TimelineRowViewModel>? _zoomLayerBuiltRows;
+    private double _zoomLayerBuiltWidth = -1;
+    private int _zoomLayerBuiltRowCount;
 
     // Cached after each render so drag handlers can convert pointer X back
     // to a millisecond offset without recomputing layout.
@@ -87,15 +105,83 @@ public sealed partial class ProcessTimelineControl : UserControl
     private double _dragOriginX;
     private Rectangle? _selectionOverlay;
 
+    // Timestamp of the currently selected exception (from the host's
+    // exception list). Drawn as a vertical marker line in the static
+    // layer so the user can see which row+time the selected exception
+    // came from. null = no highlight.
+    private double? _highlightMSec;
+    private Line? _highlightMarker;
+
     public double? SelectionStartMSec { get; private set; }
     public double? SelectionEndMSec { get; private set; }
 
     /// <summary>
     /// Raised when the user finishes a drag selection or clears it. Both
     /// arguments are null when the selection is cleared; otherwise they are
-    /// in milliseconds relative to session start, with start &lt;= end.
+    /// in milliseconds relative to session start, with start &lt;= end. The
+    /// timeline simultaneously zooms its viewport to that range, so a drag
+    /// scopes both the timeline display and any downstream consumers (e.g.
+    /// the exceptions list) to the same time window.
     /// </summary>
     public event Action<double?, double?>? TimeRangeChanged;
+
+    /// <summary>
+    /// Diagnostic event fired whenever the timeline's data state changes
+    /// (set / cleared / visible-rows replaced / rendered). Hosts can wire
+    /// this to a debug surface to trace unexpected re-renders.
+    /// </summary>
+    public event Action<string>? DiagnosticState;
+
+    /// <summary>
+    /// Highlights a specific timestamp (in MSec from session start) on the
+    /// timeline with a vertical marker line. Pass null to clear. Used by
+    /// the host to show which exception is currently selected.
+    /// </summary>
+    public void HighlightTimestamp(double? msec)
+    {
+        _highlightMSec = msec;
+        UpdateHighlightMarker();
+    }
+
+    private void UpdateHighlightMarker()
+    {
+        if (_highlightMarker is null)
+        {
+            _highlightMarker = new Line
+            {
+                Stroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xD0, 0x40)),
+                StrokeThickness = 2,
+                IsHitTestVisible = false,
+            };
+            DrawCanvas.Children.Add(_highlightMarker);
+        }
+
+        if (_highlightMSec is null || _timelineWidthPx <= 0 || ViewSpan <= 0)
+        {
+            _highlightMarker.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        double t = _highlightMSec.Value;
+        if (t < _viewStartMSec || t > _viewEndMSec)
+        {
+            // Outside the current zoom window — hide rather than clip
+            // (the user knows where the selected exception is from the
+            // list itself; cluttering with an off-screen indicator helps
+            // no one).
+            _highlightMarker.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        double x = _timelineLeftPx + (t - _viewStartMSec) / ViewSpan * _timelineWidthPx;
+        _highlightMarker.X1 = x;
+        _highlightMarker.X2 = x;
+        _highlightMarker.Y1 = HeaderHeight;
+        _highlightMarker.Y2 = DrawCanvas.Height;
+        _highlightMarker.Visibility = Visibility.Visible;
+        // Make sure it paints on top of bars/labels.
+        Canvas.SetZIndex(_highlightMarker, 100);
+    }
 
     public ProcessTimelineControl()
     {
@@ -113,7 +199,10 @@ public sealed partial class ProcessTimelineControl : UserControl
     {
         _rows = rows ?? Array.Empty<TimelineRowViewModel>();
         _maxMSec = maxMSec > 0 ? maxMSec : 1;
+        InvalidateZoomLayer();
+        ResetViewport();
         ClearSelectionInternal(notify: false);
+        DiagnosticState?.Invoke($"Timeline.SetData rows={_rows.Count} max={_maxMSec:0}ms");
         ScheduleRender();
     }
 
@@ -126,6 +215,8 @@ public sealed partial class ProcessTimelineControl : UserControl
     public void SetVisibleRows(IReadOnlyList<TimelineRowViewModel> rows)
     {
         _rows = rows ?? Array.Empty<TimelineRowViewModel>();
+        InvalidateZoomLayer();
+        DiagnosticState?.Invoke($"Timeline.SetVisibleRows rows={_rows.Count}");
         ScheduleRender();
     }
 
@@ -133,9 +224,27 @@ public sealed partial class ProcessTimelineControl : UserControl
     {
         _rows = Array.Empty<TimelineRowViewModel>();
         _maxMSec = 1;
+        InvalidateZoomLayer();
+        ResetViewport();
         ClearSelectionInternal(notify: false);
+        DiagnosticState?.Invoke("Timeline.Clear");
         ScheduleRender();
     }
+
+    private void InvalidateZoomLayer()
+    {
+        _zoomLayerBuiltRows = null;
+        _zoomLayerBuiltWidth = -1;
+        ZoomLayer.Children.Clear();
+    }
+
+    private void ResetViewport()
+    {
+        _viewStartMSec = 0;
+        _viewEndMSec = _maxMSec > 0 ? _maxMSec : 1;
+    }
+
+    private double ViewSpan => Math.Max(1e-6, _viewEndMSec - _viewStartMSec);
 
     /// <summary>Public API for callers to clear the current selection.</summary>
     public void ClearSelection() => ClearSelectionInternal(notify: true);
@@ -170,7 +279,9 @@ public sealed partial class ProcessTimelineControl : UserControl
         await Task.Yield();
         if (ct.IsCancellationRequested) return;
 
-        DrawCanvas.Children.Clear();
+        // Clear ONLY the static layer (labels/axis/gridlines/overlay).
+        // ZoomLayer is preserved unless data/width changed (see below).
+        ClearStaticElements();
         _selectionOverlay = null; // gets re-created below if a selection exists
 
         if (_rows.Count == 0)
@@ -178,7 +289,10 @@ public sealed partial class ProcessTimelineControl : UserControl
             DrawCanvas.Width = 0;
             DrawCanvas.Height = 0;
             _renderedRowCount = 0;
+            _truncated = false;
             EmptyText.Visibility = Visibility.Visible;
+            InvalidateZoomLayer();
+            DiagnosticState?.Invoke($"Render: EMPTY (_rows.Count=0) — showing 'No session loaded'");
             UpdateStatusBar();
             return;
         }
@@ -188,21 +302,21 @@ public sealed partial class ProcessTimelineControl : UserControl
         double availableWidth = VScroll.ViewportWidth > 0 ? VScroll.ViewportWidth : ActualWidth;
         if (availableWidth <= 0) return;
 
-        // Cap rows: keep the most-exception-having processes, sorted by start
-        // time so they still read chronologically.
+        var rowList = new List<TimelineRowViewModel>(_rows);
+
         IReadOnlyList<TimelineRowViewModel> rowsToRender;
-        if (_rows.Count > MaxRowsRendered)
+        if (rowList.Count > MaxRowsRendered)
         {
-            var ordered = new List<TimelineRowViewModel>(_rows);
-            ordered.Sort((a, b) => b.Exceptions.Count.CompareTo(a.Exceptions.Count));
-            ordered.RemoveRange(MaxRowsRendered, ordered.Count - MaxRowsRendered);
-            ordered.Sort((a, b) => a.StartMSec.CompareTo(b.StartMSec));
-            rowsToRender = ordered;
+            rowList.Sort((a, b) => b.Exceptions.Count.CompareTo(a.Exceptions.Count));
+            rowList.RemoveRange(MaxRowsRendered, rowList.Count - MaxRowsRendered);
+            rowList.Sort((a, b) => a.StartMSec.CompareTo(b.StartMSec));
+            rowsToRender = rowList;
             _truncated = true;
         }
         else
         {
-            rowsToRender = _rows;
+            rowList.Sort((a, b) => a.StartMSec.CompareTo(b.StartMSec));
+            rowsToRender = rowList;
             _truncated = false;
         }
 
@@ -216,35 +330,286 @@ public sealed partial class ProcessTimelineControl : UserControl
         _timelineWidthPx = availableWidth - LabelWidth - RightPadding;
         if (_timelineWidthPx < 50) _timelineWidthPx = 50;
 
-        DrawTimeAxis(_timelineLeftPx, _timelineWidthPx);
-        DrawGridlines(_timelineLeftPx, _timelineWidthPx, rowsToRender.Count);
-        await Task.Yield();
-        if (ct.IsCancellationRequested) return;
+        // Rebuild the heavy ZoomLayer only if the underlying _rows
+        // reference, count, or canvas width changed. ScheduleRender called
+        // from a pure zoom (drag-select / reset) hits this with the same
+        // _rows, so we keep the existing rectangles and only update the
+        // ZoomTransform below — turning zoom into a near-free operation
+        // even for thousands of bars.
+        bool needsZoomRebuild =
+            !ReferenceEquals(_zoomLayerBuiltRows, _rows) ||
+            Math.Abs(_zoomLayerBuiltWidth - _timelineWidthPx) > 0.5 ||
+            _zoomLayerBuiltRowCount != rowsToRender.Count;
 
-        for (int i = 0; i < rowsToRender.Count; i++)
+        if (needsZoomRebuild)
         {
-            if (ct.IsCancellationRequested) return;
-            DrawRow(rowsToRender[i], i, _timelineLeftPx, _timelineWidthPx);
+            BuildZoomLayer(rowsToRender);
+            _zoomLayerBuiltRows = _rows;
+            _zoomLayerBuiltWidth = _timelineWidthPx;
+            _zoomLayerBuiltRowCount = rowsToRender.Count;
+        }
 
-            if ((i + 1) % RenderYieldEvery == 0)
+        // Position + clip the zoom layers. ZoomClip is fixed at the
+        // timeline column so bars never spill into labels; ZoomLayer is
+        // session-full-scale and gets transformed.
+        Canvas.SetLeft(ZoomClip, _timelineLeftPx);
+        Canvas.SetTop(ZoomClip, 0);
+        ZoomClip.Width = _timelineWidthPx;
+        ZoomClip.Height = DrawCanvas.Height;
+        ZoomClip.Clip = new RectangleGeometry
+        {
+            Rect = new Rect(0, 0, _timelineWidthPx, DrawCanvas.Height),
+        };
+        ZoomLayer.Width = _timelineWidthPx;
+        ZoomLayer.Height = DrawCanvas.Height;
+
+        // Apply the zoom transform: bars were rendered at "session-full"
+        // local x = t / _maxMSec * _timelineWidthPx. Map that to viewport:
+        //   screenX = (t - viewStart) * (_timelineWidthPx / ViewSpan)
+        //   = localX * (_maxMSec / ViewSpan) + (-viewStart * _timelineWidthPx / ViewSpan)
+        //
+        // Hard-cap ScaleX so any unexpectedly tight view doesn't blow up
+        // the canvas transform (the drag handler already clamps the view
+        // span to 1 ms; this is a defensive ceiling that matches that).
+        double rawScale = _maxMSec / ViewSpan;
+        double maxScale = Math.Max(1.0, _maxMSec);   // ≥ 1 ms span ⇒ scale ≤ _maxMSec
+        double scaleX = Math.Min(rawScale, maxScale);
+        double translateX = -_viewStartMSec * _timelineWidthPx / ViewSpan;
+        ZoomTransform.ScaleX = scaleX;
+        ZoomTransform.TranslateX = translateX;
+        // Counter-scale tick rectangles so they stay 2px regardless of zoom.
+        double invScale = 1.0 / scaleX;
+        foreach (var child in ZoomLayer.Children)
+        {
+            if (child is Rectangle r && r.Tag is "tick")
             {
-                await Task.Yield();
-                if (ct.IsCancellationRequested) return;
+                if (r.RenderTransform is CompositeTransform ctr)
+                {
+                    ctr.ScaleX = invScale;
+                }
             }
         }
 
-        // Re-overlay the selection (if any) so it sits on top of the lanes
-        // and survives a resize-driven re-render.
-        if (SelectionStartMSec is double s && SelectionEndMSec is double e)
+        // Draw the static layer (labels, axis, gridlines) — these reflect
+        // the current viewport and so are redrawn on every zoom. They're
+        // cheap: O(rowCount) labels + ~O(width/120) axis ticks.
+        DrawTimeAxis(_timelineLeftPx, _timelineWidthPx);
+        DrawGridlines(_timelineLeftPx, _timelineWidthPx, rowsToRender.Count);
+        DrawRowLabels(rowsToRender);
+
+        // Reposition the timestamp highlight marker (if any) for the new
+        // viewport. Lives in the static layer because zoom changes the
+        // viewport range; we want a sharp 1px line regardless of scale.
+        UpdateHighlightMarker();
+    }
+
+    private static string FormatMs(double ms)
+    {
+        var ts = System.TimeSpan.FromMilliseconds(ms);
+        return $"{ts.TotalSeconds:0.000}s";
+    }
+
+    private static string FormatMsRange(double startMs, double endMs)
+    {
+        double duration = endMs - startMs;
+        return $"{FormatMs(startMs)} → {FormatMs(endMs)}  ({duration:0.#} ms)";
+    }
+
+    private void EmitExceptionBlock(
+        double startMs,
+        double endMs,
+        string type,
+        int count,
+        double top,
+        double height,
+        double sessionScale)
+    {
+        double xStart = startMs * sessionScale;
+        double xEnd = endMs * sessionScale;
+        double naturalWidth = xEnd - xStart;
+
+        // Three render modes:
+        //  • Single occurrence (count == 1) and zero/near-zero duration →
+        //    a thin tick that counter-scales with zoom so it stays ~2px
+        //    wide. Represents a single instant.
+        //  • A real burst (count > 1) → a solid block. Width is the
+        //    larger of (a) the actual duration in pixels at session-full
+        //    scale and (b) a count-scaled minimum so the block stays
+        //    visible at session-full zoom. The block scales naturally with
+        //    zoom (no counter-scale) so the user can see when the burst
+        //    started/ended once they zoom in.
+        //  • A wide single-occurrence run (count == 1, large duration) →
+        //    also a duration block.
+        bool isPoint = count == 1 && naturalWidth < 1.0;
+
+        double width;
+        if (isPoint)
         {
-            EnsureSelectionOverlay();
-            PositionOverlayFromMSec(s, e);
+            width = 2;
+        }
+        else if (count > 1)
+        {
+            // Count-scaled minimum so denser bursts read as bigger blocks
+            // even when their actual duration is sub-pixel at session-full.
+            // log2(1)=0, log2(10)≈3.3, log2(100)≈6.6, log2(1000)≈10.
+            double countMin = 3.0 + Math.Min(12.0, Math.Log2(count) * 1.4);
+            width = Math.Max(naturalWidth, countMin);
+        }
+        else
+        {
+            width = Math.Max(1.0, naturalWidth);
+        }
+
+        var rect = new Rectangle
+        {
+            Width = width,
+            Height = height,
+            Fill = BrushForType(type),
+        };
+
+        // Tooltip so a user can hover a colored block and identify what
+        // exception type and how many occurrences it represents — answers
+        // the "what do these colors mean?" question without needing a
+        // separate legend, and folds in the time range too.
+        string tipText = count > 1
+            ? $"{type}\n{count:N0} exceptions\n{FormatMsRange(startMs, endMs)}"
+            : $"{type}\n{FormatMs(startMs)}";
+        ToolTipService.SetToolTip(rect, tipText);
+
+        if (isPoint)
+        {
+            // Keep ticks visually 2px regardless of zoom.
+            rect.Tag = "tick";
+            rect.RenderTransform = new CompositeTransform { ScaleX = 1.0 };
+            rect.RenderTransformOrigin = new Point(0, 0);
+        }
+
+        Canvas.SetLeft(rect, xStart);
+        Canvas.SetTop(rect, top);
+        ZoomLayer.Children.Add(rect);
+    }
+
+    private void ClearStaticElements()
+    {
+        foreach (var el in _staticElements)
+        {
+            DrawCanvas.Children.Remove(el);
+        }
+        _staticElements.Clear();
+    }
+
+    private void AddStatic(UIElement el)
+    {
+        DrawCanvas.Children.Add(el);
+        _staticElements.Add(el);
+    }
+
+    /// <summary>
+    /// Raised when the user picks "Show only this process" from a timeline
+    /// row label's context menu. Carries the row so the host can both
+    /// (a) populate the process search filter and (b) drill into that
+    /// specific process (updating timeline scope and exception list).
+    /// </summary>
+    public event System.EventHandler<TimelineRowViewModel>? LabelFilterRequested;
+
+    private void DrawRowLabels(IReadOnlyList<TimelineRowViewModel> rows)
+    {
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            double y = HeaderHeight + i * RowHeight;
+            string fullLabel = row.Label;
+            // Label = "image.exe pid". Pull image off for the filter use case
+            // — the pid changes per session so it's a poor filter token.
+            int lastSpace = fullLabel.LastIndexOf(' ');
+            string imageName = lastSpace > 0 ? fullLabel.Substring(0, lastSpace) : fullLabel;
+
+            var label = new TextBlock
+            {
+                Text = fullLabel,
+                FontSize = 11,
+                Foreground = LabelBrush,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Width = LabelWidth - LeftPadding - 8,
+                IsHitTestVisible = true,
+            };
+            ToolTipService.SetToolTip(label, fullLabel);
+
+            // Right-click → "Copy name" / "Filter by this process".
+            // We hand-build the flyout per label so each entry captures the
+            // right row in its click handler.
+            var flyout = new MenuFlyout();
+            var copyItem = new MenuFlyoutItem { Text = "Copy name" };
+            copyItem.Click += (_, _) =>
+            {
+                var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                dp.SetText(imageName);
+                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
+            };
+            var copyFullItem = new MenuFlyoutItem { Text = "Copy name + pid" };
+            copyFullItem.Click += (_, _) =>
+            {
+                var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                dp.SetText(fullLabel);
+                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
+            };
+            var filterItem = new MenuFlyoutItem { Text = "Show only this process" };
+            filterItem.Click += (_, _) => LabelFilterRequested?.Invoke(this, row);
+            flyout.Items.Add(copyItem);
+            flyout.Items.Add(copyFullItem);
+            flyout.Items.Add(filterItem);
+            label.ContextFlyout = flyout;
+
+            Canvas.SetLeft(label, LeftPadding);
+            Canvas.SetTop(label, y + 4);
+            AddStatic(label);
+        }
+    }
+
+    private void BuildZoomLayer(IReadOnlyList<TimelineRowViewModel> rows)
+    {
+        ZoomLayer.Children.Clear();
+        double width = _timelineWidthPx;
+        double sessionScale = width / _maxMSec;
+
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            double y = HeaderHeight + i * RowHeight;
+            double midY = y + RowHeight / 2;
+
+            double xStart = row.StartMSec * sessionScale;
+            double xStop = row.StopMSec * sessionScale;
+            // Min 3px (un-zoomed) so a short-lived process is visible.
+            // Anchored at xStart so the bar grows rightward; under heavy
+            // zoom-out this can briefly clip past the row, but it's better
+            // than an invisible row that looks like a render bug.
+            double barWidth = Math.Max(3.0, xStop - xStart);
+            var bar = new Rectangle
+            {
+                Width = barWidth,
+                Height = 3,
+                Fill = BarBrush,
+            };
+            Canvas.SetLeft(bar, xStart);
+            Canvas.SetTop(bar, midY + 4);
+            ZoomLayer.Children.Add(bar);
+
+            // Exception runs are pre-computed at load time (sorted +
+            // grouped by type with a small gap tolerance), so rendering is
+            // just a straight emit per run — no sort, no group, no merge.
+            double markerTop = y + 2;
+            double markerHeight = RowHeight - 4;
+            foreach (var run in row.ExceptionRuns)
+            {
+                EmitExceptionBlock(run.StartMSec, run.EndMSec, run.ExceptionType, run.Count, markerTop, markerHeight, sessionScale);
+            }
         }
     }
 
     private void DrawTimeAxis(double left, double width)
     {
-        DrawCanvas.Children.Add(new Line
+        AddStatic(new Line
         {
             X1 = LeftPadding,
             X2 = left + width,
@@ -254,14 +619,17 @@ public sealed partial class ProcessTimelineControl : UserControl
             StrokeThickness = 1,
         });
 
+        double span = ViewSpan;
         int targetTicks = Math.Max(2, (int)(width / 120.0));
-        double step = NiceStep(_maxMSec / targetTicks);
-        if (step <= 0) step = _maxMSec;
+        double step = NiceStep(span / targetTicks);
+        if (step <= 0) step = span;
 
-        for (double t = 0; t <= _maxMSec + 0.5; t += step)
+        double firstTick = Math.Ceiling(_viewStartMSec / step) * step;
+        double scale = width / span;
+        for (double t = firstTick; t <= _viewEndMSec + 0.5; t += step)
         {
-            double x = left + (t / _maxMSec) * width;
-            DrawCanvas.Children.Add(new Line
+            double x = left + (t - _viewStartMSec) * scale;
+            AddStatic(new Line
             {
                 X1 = x, X2 = x,
                 Y1 = HeaderHeight - 6,
@@ -278,21 +646,24 @@ public sealed partial class ProcessTimelineControl : UserControl
             };
             Canvas.SetLeft(label, x + 2);
             Canvas.SetTop(label, 2);
-            DrawCanvas.Children.Add(label);
+            AddStatic(label);
         }
     }
 
     private void DrawGridlines(double left, double width, int rowCount)
     {
+        double span = ViewSpan;
         int targetTicks = Math.Max(2, (int)(width / 120.0));
-        double step = NiceStep(_maxMSec / targetTicks);
+        double step = NiceStep(span / targetTicks);
         if (step <= 0) return;
 
+        double scale = width / span;
+        double firstTick = Math.Ceiling(_viewStartMSec / step) * step;
         double bottom = HeaderHeight + rowCount * RowHeight;
-        for (double t = step; t < _maxMSec; t += step)
+        for (double t = firstTick; t < _viewEndMSec; t += step)
         {
-            double x = left + (t / _maxMSec) * width;
-            DrawCanvas.Children.Add(new Line
+            double x = left + (t - _viewStartMSec) * scale;
+            AddStatic(new Line
             {
                 X1 = x, X2 = x,
                 Y1 = HeaderHeight,
@@ -300,66 +671,6 @@ public sealed partial class ProcessTimelineControl : UserControl
                 Stroke = GridBrush,
                 StrokeThickness = 1,
             });
-        }
-    }
-
-    private void DrawRow(TimelineRowViewModel row, int index, double left, double width)
-    {
-        double y = HeaderHeight + index * RowHeight;
-        double midY = y + RowHeight / 2;
-
-        var label = new TextBlock
-        {
-            Text = row.Label,
-            FontSize = 11,
-            Foreground = LabelBrush,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            Width = LabelWidth - LeftPadding - 8,
-        };
-        Canvas.SetLeft(label, LeftPadding);
-        Canvas.SetTop(label, y + 4);
-        DrawCanvas.Children.Add(label);
-
-        double xStart = left + (row.StartMSec / _maxMSec) * width;
-        double xStop = left + (row.StopMSec / _maxMSec) * width;
-        if (xStop < xStart) xStop = xStart;
-
-        double barWidth = Math.Max(2, xStop - xStart);
-        var bar = new Rectangle
-        {
-            Width = barWidth,
-            Height = 3,
-            Fill = BarBrush,
-        };
-        Canvas.SetLeft(bar, xStart);
-        Canvas.SetTop(bar, midY + 4);
-        DrawCanvas.Children.Add(bar);
-
-        // Exception markers — pixel-binned per column. Within a single pixel
-        // column we keep only one tick (first exception type seen wins). This
-        // collapses tens of thousands of overlapping ticks down to at most
-        // ~timelineWidth elements per row.
-        double markerTop = y + 2;
-        double markerHeight = RowHeight - 4;
-        double scale = width / _maxMSec;
-        int minCol = (int)left - 1;
-        int maxCol = (int)(left + width) + 1;
-        var seen = new HashSet<int>();
-        foreach (var ex in row.Exceptions)
-        {
-            int col = (int)(left + ex.TimestampMSec * scale);
-            if (col < minCol || col > maxCol) continue;
-            if (!seen.Add(col)) continue;
-
-            var tick = new Rectangle
-            {
-                Width = 2,
-                Height = markerHeight,
-                Fill = BrushForType(ex.ExceptionType),
-            };
-            Canvas.SetLeft(tick, col);
-            Canvas.SetTop(tick, markerTop);
-            DrawCanvas.Children.Add(tick);
         }
     }
 
@@ -443,19 +754,54 @@ public sealed partial class ProcessTimelineControl : UserControl
 
         if (!wasDrag || xRight - xLeft < MinDragWidthPx)
         {
-            // Plain click — clear any existing selection.
+            // Plain click — reset the zoom to the full session and clear
+            // the time-range filter for downstream consumers.
+            if (_viewStartMSec > 0 || _viewEndMSec < _maxMSec)
+            {
+                ResetViewport();
+                ScheduleRender();
+            }
             ClearSelectionInternal(notify: true);
             return;
         }
 
         double startMs = PxToMSec(xLeft);
         double endMs = PxToMSec(xRight);
+
+        // Cap zoom-in so the smallest window matches the precision of the
+        // exception timestamps themselves (1 ms). Going tighter than this
+        // produces a runaway ScaleX (huge canvas dimensions, transform
+        // overflow) and crashes the renderer. Re-center the requested range
+        // around the drag midpoint so the user sees what they aimed at.
+        const double MinViewSpanMs = 1.0;
+        if (endMs - startMs < MinViewSpanMs)
+        {
+            double mid = (startMs + endMs) * 0.5;
+            startMs = mid - MinViewSpanMs * 0.5;
+            endMs = mid + MinViewSpanMs * 0.5;
+        }
+        // Don't let the window escape the session bounds.
+        if (startMs < 0) { endMs -= startMs; startMs = 0; }
+        if (endMs > _maxMSec) { startMs -= (endMs - _maxMSec); endMs = _maxMSec; if (startMs < 0) startMs = 0; }
+
         SelectionStartMSec = startMs;
         SelectionEndMSec = endMs;
 
-        EnsureSelectionOverlay();
-        PositionOverlayFromMSec(startMs, endMs);
+        // Zoom the viewport to the dragged range. Rows that fall entirely
+        // outside this window will be dropped by the next render so the
+        // user effectively sees "only processes active in this time range".
+        _viewStartMSec = startMs;
+        _viewEndMSec = endMs;
 
+        // Discard the temporary in-flight selection rectangle — once the
+        // viewport equals the selection there's no need to render a separate
+        // overlay (the whole timeline IS the selection now).
+        if (_selectionOverlay is not null)
+        {
+            _selectionOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        ScheduleRender();
         UpdateStatusBar();
         TimeRangeChanged?.Invoke(startMs, endMs);
     }
@@ -500,7 +846,7 @@ public sealed partial class ProcessTimelineControl : UserControl
         Math.Clamp(x, _timelineLeftPx, _timelineLeftPx + _timelineWidthPx);
 
     private double PxToMSec(double x) =>
-        (x - _timelineLeftPx) / _timelineWidthPx * _maxMSec;
+        _viewStartMSec + (x - _timelineLeftPx) / _timelineWidthPx * ViewSpan;
 
     // -------------------- Status bar --------------------
 
@@ -510,7 +856,7 @@ public sealed partial class ProcessTimelineControl : UserControl
 
         if (SelectionStartMSec is double s && SelectionEndMSec is double e)
         {
-            parts.Add($"Time range: {FormatMSec(s)} – {FormatMSec(e)} (drag again or click to clear)");
+            parts.Add($"Zoomed: {FormatMSec(s)} – {FormatMSec(e)} (click to reset)");
         }
         if (_truncated)
         {
@@ -518,7 +864,7 @@ public sealed partial class ProcessTimelineControl : UserControl
         }
         else if (_rows.Count > 0 && _renderedRowCount > 0)
         {
-            parts.Add($"{_rows.Count:N0} processes  •  Click and drag on the timeline to filter by time");
+            parts.Add($"{_renderedRowCount:N0} processes in view  •  Drag to zoom, click to reset");
         }
 
         if (parts.Count == 0)

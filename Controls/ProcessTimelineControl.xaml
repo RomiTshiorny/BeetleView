@@ -30,7 +30,27 @@
                       ZoomMode="Disabled">
             <Canvas x:Name="DrawCanvas"
                     Background="Transparent"
-                    HorizontalAlignment="Stretch" />
+                    HorizontalAlignment="Stretch">
+                <!--
+                    ZoomLayer holds the bars and exception ticks. It's
+                    rendered ONCE at "session-full" scale (local x = time
+                    proportionally mapped across timelineWidth) and then
+                    zoomed via the CompositeTransform below — clearing and
+                    re-creating thousands of XAML elements on every drag
+                    was the source of the visible lag. ClipToBounds keeps
+                    bars from spilling over the labels column when
+                    zoomed-in.
+                -->
+                <Canvas x:Name="ZoomClip">
+                    <Canvas x:Name="ZoomLayer">
+                        <Canvas.RenderTransform>
+                            <CompositeTransform x:Name="ZoomTransform"
+                                                ScaleX="1"
+                                                TranslateX="0" />
+                        </Canvas.RenderTransform>
+                    </Canvas>
+                </Canvas>
+            </Canvas>
         </ScrollViewer>
         <TextBlock x:Name="EmptyText"
                    Grid.Row="1"

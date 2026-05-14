@@ -45,6 +45,24 @@
                        Opacity="0.7"
                        TextTrimming="CharacterEllipsis"
                        Text="No file loaded" />
+            <ToggleSwitch x:Name="DebugToggle"
+                          MinWidth="0"
+                          VerticalAlignment="Center"
+                          OnContent="Debug"
+                          OffContent="Debug"
+                          Toggled="DebugToggle_Toggled"
+                          ToolTipService.ToolTip="Show diagnostic info about TreeView selection events" />
+            <TextBox x:Name="DebugText"
+                     VerticalAlignment="Center"
+                     Margin="6,0,0,0"
+                     FontSize="11"
+                     Foreground="Crimson"
+                     Background="Transparent"
+                     BorderThickness="0"
+                     IsReadOnly="True"
+                     MinWidth="400"
+                     Visibility="Collapsed"
+                     Text="" />
         </StackPanel>
 
         <!-- Session info -->
@@ -75,7 +93,12 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
-                    <Grid Grid.Row="0" Padding="10,4" ColumnSpacing="8">
+                <Grid Grid.Row="0" Padding="10,6" RowSpacing="6">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0" ColumnSpacing="8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
@@ -89,38 +112,72 @@
                                  PlaceholderText="Filter processes..."
                                  TextChanged="ProcessFilterBox_TextChanged" />
                     </Grid>
+                    <Grid Grid.Row="1" ColumnSpacing="4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button Grid.Column="0"
+                                x:Name="SelectAllButton"
+                                Click="SelectAllButton_Click"
+                                HorizontalAlignment="Stretch"
+                                FontSize="12"
+                                Content="Select all"
+                                ToolTipService.ToolTip="Check all processes (include them in the timeline and exception list)" />
+                        <Button Grid.Column="1"
+                                x:Name="DeselectAllButton"
+                                Click="DeselectAllButton_Click"
+                                HorizontalAlignment="Stretch"
+                                FontSize="12"
+                                Content="Deselect all"
+                                ToolTipService.ToolTip="Uncheck all processes" />
+                        <ToggleButton Grid.Column="2"
+                                      x:Name="HideEmptyButton"
+                                      Click="HideEmptyButton_Click"
+                                      HorizontalAlignment="Stretch"
+                                      FontSize="12"
+                                      Content="Hide empty"
+                                      ToolTipService.ToolTip="Hide processes whose entire subtree has zero exceptions" />
+                    </Grid>
+                </Grid>
                    
                     <TreeView Grid.Row="1"
                               x:Name="ProcessTree"
-                              SelectionMode="Single"
-                              SelectionChanged="ProcessTree_SelectionChanged">
+                              SelectionMode="Single">
                         <TreeView.ItemTemplate>
-                            <DataTemplate x:DataType="vm:ProcessViewModel">
-                                <TreeViewItem ItemsSource="{x:Bind Children}"
-                                              IsExpanded="{x:Bind IsExpanded, Mode=OneTime}">
-                                    <Grid ColumnSpacing="6" Padding="0,2">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="*" />
-                                        </Grid.ColumnDefinitions>
-                                        <CheckBox Grid.Column="0"
-                                                  MinWidth="0"
-                                                  Padding="0"
-                                                  VerticalAlignment="Center"
-                                                  IsChecked="{x:Bind IsIncluded, Mode=TwoWay}"
-                                                  Click="ProcessIncludeCheckBox_Click"
-                                                  ToolTipService.ToolTip="Include this process (and its descendants) in the timeline and exception list" />
-                                        <StackPanel Grid.Column="1">
-                                            <TextBlock Text="{x:Bind DisplayName}"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       FontWeight="SemiBold" />
-                                            <TextBlock FontSize="11" Opacity="0.7">
-                                                <Run Text="{x:Bind PidPrefix}" /><Run Text="{x:Bind ExceptionCount}" />
-                                                <Run Text=" exceptions" />
-                                            </TextBlock>
-                                        </StackPanel>
-                                    </Grid>
-                                </TreeViewItem>
+                            <!--
+                                Unbound (TreeViewNode) mode: the DataContext
+                                handed to this template is the TreeViewNode,
+                                NOT its Content. We use legacy {Binding ...}
+                                with the Content.* path so the inner controls
+                                actually see the wrapped ProcessViewModel.
+                                (x:Bind here would compile against the wrong
+                                type and crash at runtime.)
+                            -->
+                            <DataTemplate>
+                                <Grid ColumnSpacing="6" Padding="0,2" Opacity="{Binding Content.RowOpacity}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <CheckBox Grid.Column="0"
+                                              MinWidth="0"
+                                              Padding="0"
+                                              VerticalAlignment="Center"
+                                              IsChecked="{Binding Content.IsIncluded, Mode=TwoWay}"
+                                              Click="ProcessIncludeCheckBox_Click"
+                                              ToolTipService.ToolTip="Include this process (and its descendants) in the timeline and exception list" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="{Binding Content.DisplayName}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   FontWeight="{Binding Content.LabelWeight}" />
+                                        <TextBlock FontSize="11" Opacity="0.7">
+                                            <Run Text="{Binding Content.PidPrefix}" /><Run Text="{Binding Content.ExceptionCount}" />
+                                            <Run Text=" exceptions" />
+                                        </TextBlock>
+                                    </StackPanel>
+                                </Grid>
                             </DataTemplate>
                         </TreeView.ItemTemplate>
                     </TreeView>
@@ -225,14 +282,15 @@
                             <!-- Loading overlay for the exceptions list -->
                             <Border x:Name="ExceptionsLoadingOverlay"
                                     Visibility="Collapsed"
-                                    Background="{ThemeResource LayerOnAcrylicFillColorDefaultBrush}"
-                                    Opacity="0.85"
+                                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
                                     HorizontalAlignment="Stretch"
                                     VerticalAlignment="Top"
-                                    Padding="10,6">
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="0,0,0,1"
+                                    Padding="10,8">
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <ProgressRing IsActive="True" Width="16" Height="16" />
-                                    <TextBlock x:Name="ExceptionsLoadingText" Text="Loading..." FontSize="12" />
+                                    <TextBlock x:Name="ExceptionsLoadingText" Text="Loading..." FontSize="12" VerticalAlignment="Center" />
                                 </StackPanel>
                             </Border>
                         </Grid>

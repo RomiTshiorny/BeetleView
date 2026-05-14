@@ -108,6 +108,8 @@ internal static class SessionFileLoader
                 markers.Add(new ExceptionMarker(ex.TimestampMS, ex.ExceptionType ?? ""));
             }
 
+            var runs = BuildExceptionRuns(markers, end);
+
             string image = string.IsNullOrEmpty(p.ImageFileName) ? $"pid {p.Id}" : p.ImageFileName;
             rows.Add(new TimelineRowViewModel
             {
@@ -116,11 +118,58 @@ internal static class SessionFileLoader
                 StartMSec = start,
                 StopMSec = stop,
                 Exceptions = markers,
+                ExceptionRuns = runs,
                 Process = p,
             });
         }
 
         return (rows, end);
+    }
+
+    /// <summary>
+    /// Groups consecutive same-type exception markers into contiguous runs.
+    /// Markers are sorted by timestamp first; a small session-relative gap
+    /// tolerance (≈ 0.05% of total session duration) keeps a burst of
+    /// rapid-fire same-type exceptions as a single block while still
+    /// splitting genuinely-separated events. Computed once at load so the
+    /// timeline renderer doesn't pay the sort/group cost per zoom.
+    /// </summary>
+    private static IReadOnlyList<ExceptionRun> BuildExceptionRuns(
+        List<ExceptionMarker> markers,
+        double sessionEndMSec)
+    {
+        if (markers.Count == 0) return Array.Empty<ExceptionRun>();
+
+        var sorted = new List<ExceptionMarker>(markers);
+        sorted.Sort((a, b) => a.TimestampMSec.CompareTo(b.TimestampMSec));
+
+        double gapToleranceMs = Math.Max(50.0, sessionEndMSec * 0.005);
+
+        var runs = new List<ExceptionRun>();
+        string runType = sorted[0].ExceptionType;
+        double runStart = sorted[0].TimestampMSec;
+        double runEnd = runStart;
+        int runCount = 1;
+
+        for (int i = 1; i < sorted.Count; i++)
+        {
+            var ex = sorted[i];
+            bool sameType = ex.ExceptionType == runType;
+            bool contiguous = (ex.TimestampMSec - runEnd) <= gapToleranceMs;
+            if (sameType && contiguous)
+            {
+                runEnd = ex.TimestampMSec;
+                runCount++;
+                continue;
+            }
+            runs.Add(new ExceptionRun(runStart, runEnd, runType, runCount));
+            runType = ex.ExceptionType;
+            runStart = ex.TimestampMSec;
+            runEnd = ex.TimestampMSec;
+            runCount = 1;
+        }
+        runs.Add(new ExceptionRun(runStart, runEnd, runType, runCount));
+        return runs;
     }
 
     private static IReadOnlyList<ProcessViewModel> BuildTree(Session session)
@@ -207,12 +256,19 @@ internal static class SessionFileLoader
 
     private static ProcessViewModel MakeVm(RecorderProcess p, IReadOnlyList<ProcessViewModel> kids)
     {
+        // Aggregate exception count across this process and its entire
+        // subtree so the tree label matches what the exception list will
+        // actually show when the node is selected (the list aggregates
+        // descendants too — see ExceptionViewModelBuilder).
+        int subtreeCount = p.Exceptions.Count;
+        foreach (var c in kids) subtreeCount += c.ExceptionCount;
+
         var vm = new ProcessViewModel
         {
             Process = p,
             DisplayName = string.IsNullOrEmpty(p.ImageFileName) ? $"(pid {p.Id})" : p.ImageFileName,
             Pid = p.Id,
-            ExceptionCount = p.Exceptions.Count,
+            ExceptionCount = subtreeCount,
             PidPrefix = $"pid={p.Id}  •  ",
             AllChildren = kids,
             IsExpanded = true,
