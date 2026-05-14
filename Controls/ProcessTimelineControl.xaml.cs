@@ -35,7 +35,6 @@ public sealed partial class ProcessTimelineControl : UserControl
     private const double RightPadding = 12;
 
     private const int MaxRowsRendered = 400;
-    private const int RenderYieldEvery = 25;
 
     // Below this drag width (in pixels) treat the gesture as a click and
     // clear any existing selection instead of committing a new one.
