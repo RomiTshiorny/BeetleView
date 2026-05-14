@@ -110,4 +110,4 @@ Key knobs (in `.csproj` + `.pubxml`):
 
 ## License
 
-No license has been chosen yet. Until one is added, default copyright applies — see [choosealicense.com](https://choosealicense.com/) if you want to make this reusable.
+Released under the [MIT License](LICENSE).
