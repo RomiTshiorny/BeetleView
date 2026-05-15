@@ -242,7 +242,7 @@
                                 <ColumnDefinition Width="*" MinWidth="80" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="Time (UTC)" FontWeight="SemiBold" FontSize="12" />
-                            <Border Grid.Column="1"
+                            <tlc:ResizeGripBorder Grid.Column="1"
                                     Width="6"
                                     Background="Transparent"
                                     ManipulationMode="TranslateX"
@@ -251,9 +251,9 @@
                                 <Border Width="1"
                                         Background="{ThemeResource CardStrokeColorDefaultBrush}"
                                         HorizontalAlignment="Center" />
-                            </Border>
+                            </tlc:ResizeGripBorder>
                             <TextBlock Grid.Column="2" Text="Type" FontWeight="SemiBold" FontSize="12" />
-                            <Border Grid.Column="3"
+                            <tlc:ResizeGripBorder Grid.Column="3"
                                     Width="6"
                                     Background="Transparent"
                                     ManipulationMode="TranslateX"
@@ -262,7 +262,7 @@
                                 <Border Width="1"
                                         Background="{ThemeResource CardStrokeColorDefaultBrush}"
                                         HorizontalAlignment="Center" />
-                            </Border>
+                            </tlc:ResizeGripBorder>
                             <TextBlock Grid.Column="4" Text="Message" FontWeight="SemiBold" FontSize="12" />
                         </Grid>
 
