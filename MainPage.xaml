@@ -229,19 +229,41 @@
                                        FontSize="12" />
                         </Grid>
 
-                        <!-- Column headers -->
+                        <!-- Column headers (resizable: drag the thin lines between columns) -->
                         <Grid Grid.Row="1"
                               Padding="10,4"
                               Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                              ColumnSpacing="8">
+                              ColumnSpacing="0">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="170" />
-                                <ColumnDefinition Width="220" />
-                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition x:Name="ExHCol0" Width="170" MinWidth="80" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition x:Name="ExHCol1" Width="220" MinWidth="80" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" MinWidth="80" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="Time (UTC)" FontWeight="SemiBold" FontSize="12" />
-                            <TextBlock Grid.Column="1" Text="Type" FontWeight="SemiBold" FontSize="12" />
-                            <TextBlock Grid.Column="2" Text="Message" FontWeight="SemiBold" FontSize="12" />
+                            <Border Grid.Column="1"
+                                    Width="6"
+                                    Background="Transparent"
+                                    ManipulationMode="TranslateX"
+                                    ManipulationDelta="ExceptionHeaderSplitter_ManipulationDelta"
+                                    Tag="0">
+                                <Border Width="1"
+                                        Background="{ThemeResource CardStrokeColorDefaultBrush}"
+                                        HorizontalAlignment="Center" />
+                            </Border>
+                            <TextBlock Grid.Column="2" Text="Type" FontWeight="SemiBold" FontSize="12" />
+                            <Border Grid.Column="3"
+                                    Width="6"
+                                    Background="Transparent"
+                                    ManipulationMode="TranslateX"
+                                    ManipulationDelta="ExceptionHeaderSplitter_ManipulationDelta"
+                                    Tag="1">
+                                <Border Width="1"
+                                        Background="{ThemeResource CardStrokeColorDefaultBrush}"
+                                        HorizontalAlignment="Center" />
+                            </Border>
+                            <TextBlock Grid.Column="4" Text="Message" FontWeight="SemiBold" FontSize="12" />
                         </Grid>
 
                         <Grid Grid.Row="2">
@@ -256,21 +278,25 @@
                                 </ListView.ItemContainerStyle>
                                 <ListView.ItemTemplate>
                                     <DataTemplate x:DataType="vm:ExceptionViewModel">
-                                        <Grid ColumnSpacing="8">
+                                        <Grid ColumnSpacing="0"
+                                              Loaded="ExceptionRowGrid_Loaded"
+                                              Unloaded="ExceptionRowGrid_Unloaded">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="170" />
+                                                <ColumnDefinition Width="6" />
                                                 <ColumnDefinition Width="220" />
+                                                <ColumnDefinition Width="6" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0"
                                                        Text="{x:Bind TimestampText}"
                                                        FontFamily="Consolas"
                                                        FontSize="12" />
-                                            <TextBlock Grid.Column="1"
+                                            <TextBlock Grid.Column="2"
                                                        Text="{x:Bind ExceptionType}"
                                                        TextTrimming="CharacterEllipsis"
                                                        FontSize="12" />
-                                            <TextBlock Grid.Column="2"
+                                            <TextBlock Grid.Column="4"
                                                        Text="{x:Bind ExceptionMessage}"
                                                        TextTrimming="CharacterEllipsis"
                                                        FontSize="12"

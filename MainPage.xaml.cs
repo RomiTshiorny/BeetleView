@@ -83,6 +83,14 @@ public sealed partial class MainPage : Page
         Timeline.DiagnosticState += s => WriteDebug($"[timeline] {s}");
         Timeline.LabelFilterRequested += Timeline_LabelFilterRequested;
 
+        // Resizable exception list columns. Header columns are mutated by the
+        // splitter borders' ManipulationDelta handlers; we re-broadcast those
+        // widths to every realized row grid (tracked via Loaded/Unloaded on
+        // the DataTemplate Grid) since ListView DataTemplates have their own
+        // namescope and can't bind ElementName to page-level ColumnDefinitions.
+        ExHCol0.RegisterPropertyChangedCallback(ColumnDefinition.WidthProperty, (_, _) => SyncAllExceptionRowGrids());
+        ExHCol1.RegisterPropertyChangedCallback(ColumnDefinition.WidthProperty, (_, _) => SyncAllExceptionRowGrids());
+
         Loaded += MainPage_Loaded;
     }
 
@@ -794,5 +802,62 @@ public sealed partial class MainPage : Page
         {
             StackTraceText.Text = $"Failed to compute stack trace:\n{ex}";
         }
+    }
+
+    // -------------------- Resizable exception list columns --------------------
+
+    // Currently-realized row grids from the ListView's DataTemplate. ListView
+    // virtualizes containers (and our DataTemplate's outer Grid is what fires
+    // Loaded/Unloaded as containers are recycled), so this set tracks only
+    // the rows currently materialized — exactly what needs width sync.
+    private readonly HashSet<Microsoft.UI.Xaml.Controls.Grid> _exceptionRowGrids = new();
+
+    private void ExceptionRowGrid_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Grid g)
+        {
+            _exceptionRowGrids.Add(g);
+            SyncExceptionRowGrid(g);
+        }
+    }
+
+    private void ExceptionRowGrid_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Microsoft.UI.Xaml.Controls.Grid g)
+        {
+            _exceptionRowGrids.Remove(g);
+        }
+    }
+
+    private void SyncExceptionRowGrid(Microsoft.UI.Xaml.Controls.Grid g)
+    {
+        // Row Grid columns are: 0=Time, 1=sep, 2=Type, 3=sep, 4=Message.
+        // Sync cols 0 and 2 to the header's resizable columns; the message
+        // column (4, "*") absorbs the remaining width automatically.
+        if (g.ColumnDefinitions.Count >= 5)
+        {
+            g.ColumnDefinitions[0].Width = ExHCol0.Width;
+            g.ColumnDefinitions[2].Width = ExHCol1.Width;
+        }
+    }
+
+    private void SyncAllExceptionRowGrids()
+    {
+        foreach (var g in _exceptionRowGrids) SyncExceptionRowGrid(g);
+    }
+
+    private void ExceptionHeaderSplitter_ManipulationDelta(
+        object sender,
+        Microsoft.UI.Xaml.Input.ManipulationDeltaRoutedEventArgs e)
+    {
+        if (sender is not Border b) return;
+        // Tag "0" = splitter to the right of the Time column (resizes ExHCol0);
+        // Tag "1" = splitter to the right of the Type column (resizes ExHCol1).
+        var col = b.Tag?.ToString() == "0" ? ExHCol0 : ExHCol1;
+        double minWidth = col.MinWidth > 0 ? col.MinWidth : 40;
+        double next = Math.Max(minWidth, col.ActualWidth + e.Delta.Translation.X);
+        col.Width = new GridLength(next);
+        // RegisterPropertyChangedCallback in the ctor wires this up to
+        // SyncAllExceptionRowGrids, so no explicit call needed here.
     }
 }
